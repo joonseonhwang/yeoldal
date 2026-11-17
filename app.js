@@ -3,7 +3,7 @@
 // 기록은 이 기기의 IndexedDB에 저장한다. '부부 공유'를 켠 경우에만 사용자가 만든 Firebase 실시간 데이터베이스로 기록을 보낸다.
 // 주별 안내·검사 시기 내용과 그 출처는 data.js 참고.
 'use strict';
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const DB_NAME = 'yeoldal-note';
 const STORES = ['profile', 'weights', 'events', 'diary', 'kicks', 'contractions', 'checks'];
 const DAY = 86400000;
@@ -11,7 +11,7 @@ const DAY = 86400000;
 const R = {};                       // 삭제 표시(tombstone)까지 포함한 원본 — 백업·공유용
 const S = { meta: {} };             // 화면용 (삭제된 것 제외)
 STORES.forEach(s => { R[s] = []; S[s] = []; });
-const UI = { week: null, rec: 'weight', cat: Object.keys(CHECKLIST)[0], q: '', past: false };
+const UI = { week: null, selW: null, rec: 'weight', cat: Object.keys(CHECKLIST)[0], q: '', past: false };
 let db, installEvt = null;
 const $ = s => document.querySelector(s);
 const view = $('#view'), sheet = $('#sheet'), sheetBg = $('#sheet-bg');
@@ -50,13 +50,50 @@ const gaLabel = ds => { const g = ga(ds); return g && g.days >= 0 && g.days < 30
 const curWeek = () => { const g = ga(); return g ? Math.max(4, Math.min(40, g.w)) : 4; };
 const weekData = w => { const r = WEEKS.find(x => x[0] === w); return r && { w: r[0], size: r[1], len: r[2], wt: r[3], baby: r[4], mom: r[5], todo: r[6] }; };
 const trimester = w => w < 14 ? '임신 초기' : w < 28 ? '임신 중기' : '임신 후기';
-function gainInfo() {
-  const p = prof(); if (!(p.height > 0 && p.preWeight > 0)) return null;
-  const bmi = p.preWeight / (p.height / 100) ** 2, g = GAIN.find(x => bmi < x[0]);
-  return { bmi, lo: g[1], hi: g[2], label: g[3] };
+/* ---------- 체중 가이드 (baekdo 앱 계산 방식, data.js의 STDS·FETAL·HY) ---------- */
+function catIn(key, bmi) { const s = STDS[key]; let i = 0; while (i < 3 && bmi >= s.cuts[i]) i++; return { name: s.names[i], total: s.totals[i], first: s.first[i] }; }
+const bmiOf = () => { const p = prof(); return p.height > 100 && p.height < 230 && p.preWeight > 25 && p.preWeight < 250 ? p.preWeight / (p.height / 100) ** 2 : null; };
+// 자동: 내 BMI에서 출산 무렵 권장 상한이 가장 낮은 기준을 고른다
+function autoKey() {
+  const bmi = bmiOf(); if (!bmi) return 'jp2021';
+  return Object.keys(STDS).reduce((best, k) => { const a = catIn(best, bmi), c = catIn(k, bmi);
+    return c.total[1] < a.total[1] || (c.total[1] === a.total[1] && c.total[0] < a.total[0]) ? k : best; }, 'jp2021');
 }
-// 주차별 참고 범위: 13주까지 0.5~2kg, 이후 40주의 권장 총 증가량까지 직선으로 이음 ([Claude] 단순화)
-function band(w, gi) { const f = (a, b) => w <= 13 ? a * w / 13 : a + (b - a) * (Math.min(w, 40) - 13) / 27; return [f(0.5, gi.lo), f(2, gi.hi)]; }
+const stdSel = () => STDS[prof().std] ? prof().std : 'auto';
+const stdKey = () => stdSel() === 'auto' ? autoKey() : stdSel();
+function stdNote() {
+  if (stdSel() !== 'auto') return STDS[stdSel()].note;
+  const bmi = bmiOf(); if (!bmi) return '자동: 키·임신 전 몸무게를 넣으면 상한이 가장 낮은 기준을 골라요.';
+  return `자동: 상한이 가장 낮은 ${STDS[autoKey()].name} 기준 적용 (출산 무렵 상한 ${Object.keys(STDS).map(k => STDS[k].name.split(' ')[0] + ' +' + catIn(k, bmi).total[1]).join(' · ')}kg)`;
+}
+// 권장 기준 정보: 임신 전 몸무게(base), BMI, 구간(c)
+function guide() { const bmi = bmiOf(); return bmi ? { bmi, base: Number(prof().preWeight), c: catIn(stdKey(), bmi) } : null; }
+// w주의 임신 전 대비 권장 증가 [하한, 상한] — 0~13주는 1분기 증가량까지, 이후 40주 총 증가량까지 직선
+function range(w, c) {
+  if (w <= 13) return [c.first[0] * w / 13, c.first[1] * w / 13];
+  const t = (Math.min(w, 40) - 13) / 27;
+  return [c.first[0] + (c.total[0] - c.first[0]) * t, c.first[1] + (c.total[1] - c.first[1]) * t];
+}
+function statusOf(k, w, base, c) {
+  const r = range(Math.min(w, 40), c);
+  if (k < base + r[0] - 0.05) return { cls: 'lo', txt: '권장보다 적음' };
+  if (k > base + r[1] + 0.05) return { cls: 'bad', txt: '권장보다 많음' };
+  return { cls: 'ok', txt: '권장 범위' };
+}
+function lerpTbl(tbl, w) {
+  const ks = Object.keys(tbl).map(Number).sort((a, b) => a - b);
+  if (w <= ks[0]) return tbl[ks[0]];
+  for (let i = 1; i < ks.length; i++) if (w <= ks[i]) { const a = ks[i - 1], b = ks[i]; return tbl[a] + (tbl[b] - tbl[a]) * (w - a) / (b - a); }
+  return tbl[ks[ks.length - 1]];
+}
+function lerp5(arr, w) { const t = Math.max(0, Math.min(40, w)) / 10, i = Math.min(3, Math.floor(t)); return arr[i] + (arr[i + 1] - arr[i]) * (t - i); }
+const comp = w => { const x = Math.min(w, 40); return { baby: lerpTbl(FETAL, x), pla: lerp5(HY.pla, x), mat: lerp5(HY.mat, x) }; };
+const pregKg = w => { const p = comp(w); return p.baby + p.pla + p.mat; };
+const fw = kg => kg < 1 ? Math.round(kg * 1000) + 'g' : kg1(kg) + 'kg';
+const sg = n => (n >= 0 ? '+' : '') + kg1(n);
+const wd = w => { const d = Math.round(w * 7); return `${Math.floor(d / 7)}주 ${d % 7}일`; };
+// 몸무게 기록에 주수(w)를 붙여 오래된 순으로
+const wlogs = () => prof().dueDate ? S.weights.filter(x => x.date && x.kg > 0).map(x => ({ ...x, kg: Number(x.kg), w: (dnum(x.date) - lmpNum()) / 7 })).filter(x => x.w >= 0 && x.w <= 42).sort((a, b) => a.w - b.w) : [];
 
 /* ---------- 저장소 ---------- */
 function openDB() {
@@ -135,7 +172,7 @@ function pickFile() { const f = $('#file'); f.value = ''; f.click(); }
 $('#file').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   let o;
-  try { o = JSON.parse(await f.text()); validate(o); } catch (err) { return toast(err.message.includes('JSON') ? 'JSON 파일을 읽을 수 없어요' : err.message); }
+  try { o = JSON.parse(await f.text()); if (o && o.app === 'baekdo-weight' && Array.isArray(o.logs)) return runBaekdoImport(o); validate(o); } catch (err) { return toast(err.message.includes('JSON') ? 'JSON 파일을 읽을 수 없어요' : err.message); }
   let mode = 'replace';
   if (hasData()) {
     mode = await choose('백업 파일을 어떻게 불러올까요?\n· 합치기: 같은 항목은 더 최근에 수정한 쪽을 남김\n· 전체 바꾸기: 지금 기록을 지우고 파일 내용으로 교체',
@@ -381,12 +418,14 @@ function vHome() {
   const nowEx = EXAMS.filter(x => examState(x).st === 'now' && !ck(x.id)?.done);
   o += `<div class="card"><h2>다가오는 일정 <button class="add" data-act="ev-add">＋ 추가</button></h2>${next.map(evRow).join('') || '<div class="empty">등록된 일정이 없어요</div>'}
     ${nowEx.map(x => `<div class="row" data-act="go-cal"><div class="mid"><div class="nm">${h(x.name)}</div><div class="sub"><span class="tag now">지금 시기</span>${examState(x).range}</div></div></div>`).join('')}</div>`;
-  const ws = [...S.weights].sort((a, b) => a.date.localeCompare(b.date)), last = ws[ws.length - 1], gi = gainInfo();
-  o += `<div class="card"><h2>몸무게 <button class="add" data-act="w-add">＋ 기록</button></h2>` + (last
-    ? `<div class="big">${kg1(last.kg)}kg ${p.preWeight > 0 ? `<span class="sub">임신 전보다 ${last.kg - p.preWeight >= 0 ? '+' : ''}${kg1(last.kg - p.preWeight)}kg</span>` : ''}</div><div class="sub">${fmtD(last.date)} 기록</div>`
-    : `<div class="empty">아직 기록이 없어요</div>`) + (gi
-    ? `<div class="note">임신 전 BMI ${kg1(gi.bmi)}(${gi.label}) → 출산까지 권장 증가 ${gi.lo}~${gi.hi}kg${g.days > 0 ? ` · 지금 주수 참고 범위 +${kg1(band(g.days / 7, gi)[0])}~${kg1(band(g.days / 7, gi)[1])}kg` : ''}</div>`
-    : `<div class="note">설정에서 키와 임신 전 몸무게를 넣으면 권장 범위를 보여줘요.</div>`) + `</div>`;
+  const ws = [...S.weights].sort((a, b) => a.date.localeCompare(b.date)), last = ws[ws.length - 1], gd = guide();
+  const lw = last && (dnum(last.date) - lmpNum()) / 7, lst = gd && last && lw >= 0 && lw <= 42 ? statusOf(Number(last.kg), lw, gd.base, gd.c) : null;
+  const tr = gd && g.days > 0 && g.days <= 280 ? range(g.days / 7, gd.c) : null;
+  o += `<div class="card"><h2>몸무게 <span><button class="add" data-act="go-weight">가이드 ›</button> <button class="add" data-act="w-add">＋ 기록</button></span></h2>` + (last
+    ? `<div class="big">${kg1(last.kg)}kg ${p.preWeight > 0 ? `<span class="sub">임신 전보다 ${sg(last.kg - p.preWeight)}kg</span>` : ''}</div><div class="sub">${fmtD(last.date)} 기록${lst ? ` · <b class="${lst.cls}">${lst.txt}</b>` : ''}</div>`
+    : `<div class="empty">아직 기록이 없어요</div>`) + (gd
+    ? `<div class="note">${tr ? `오늘(${g.w}주 ${g.d}일) 권장 <b>${kg1(gd.base + tr[0])}~${kg1(gd.base + tr[1])}kg</b> · ` : ''}임신 전 BMI ${kg1(gd.bmi)} ${gd.c.name} · 출산 무렵 목표 ${kg1(gd.base + gd.c.total[0])}~${kg1(gd.base + gd.c.total[1])}kg (${STDS[stdKey()].name} 기준)</div>`
+    : `<div class="note">설정에서 키와 임신 전 몸무게를 넣으면 주수별 권장 범위를 보여줘요.</div>`) + `</div>`;
   o += `<div class="card"><h2>빠른 기록</h2><div class="btns"><button class="btn" data-act="d-add">일기·증상</button><button class="btn" data-act="go-kick">태동 세기</button><button class="btn" data-act="go-con">진통 재기</button></div></div>`;
   return o;
 }
@@ -408,35 +447,250 @@ function vWeek() {
 }
 
 /* ---------- 기록: 몸무게 / 일기 / 태동 / 진통 ---------- */
-function weightChart() {
-  const p = prof(); if (!p.dueDate) return '';
-  const gi = gainInfo(), pre = Number(p.preWeight) || 0;
-  const pts = S.weights.filter(x => x.date && x.kg > 0).map(x => ({ w: (dnum(x.date) - lmpNum()) / 7, kg: Number(x.kg) })).filter(x => x.w >= 0 && x.w <= 42).sort((a, b) => a.w - b.w);
-  if (pre) pts.unshift({ w: 0, kg: pre });
-  if (pts.length < 2 && !gi) return '';
-  const ys = pts.map(x => x.kg); if (gi) ys.push(pre, pre + gi.hi);
-  const lo = Math.floor(Math.min(...ys) - 1), hi = Math.ceil(Math.max(...ys) + 1), step = hi - lo <= 8 ? 2 : hi - lo <= 20 ? 4 : 10;
-  const Wd = 320, H = 190, L = 30, Rt = 10, T = 10, B = 24;
-  const X = w => L + (Wd - L - Rt) * Math.min(w, 42) / 42, Y = k => T + (H - T - B) * (hi - k) / (hi - lo), f = n => n.toFixed(1);
-  let s = `<svg class="chart" viewBox="0 0 ${Wd} ${H}" role="img" aria-label="임신 주수별 몸무게 그래프">`;
-  for (let k = Math.ceil(lo / step) * step; k <= hi; k += step) s += `<line x1="${L}" x2="${Wd - Rt}" y1="${f(Y(k))}" y2="${f(Y(k))}" stroke="#383146" stroke-width="1"/><text x="${L - 4}" y="${f(Y(k) + 3)}" text-anchor="end">${k}</text>`;
-  for (const w of [0, 10, 20, 30, 40]) s += `<text x="${f(X(w))}" y="${H - 8}" text-anchor="middle">${w}주</text>`;
-  if (gi) {
-    const ws = Array.from({ length: 41 }, (_, i) => i);
-    s += `<polygon fill="#5fd39a" fill-opacity=".18" points="${ws.map(w => f(X(w)) + ',' + f(Y(pre + band(w, gi)[1]))).join(' ')} ${ws.reverse().map(w => f(X(w)) + ',' + f(Y(pre + band(w, gi)[0]))).join(' ')}"/>
-      <text x="${f(X(40))}" y="${f(Y(pre + gi.hi) - 4)}" text-anchor="end" style="fill:#5fd39a">권장 범위(참고)</text>`;
+/* 몸무게 = 체중 가이드 화면. 그래프 배경은 render 때 그리고, 선택 주수(커서·수치·구성·표)는 updSel()만 다시 그린다 */
+const G = { W: 360, H: 250, pl: 36, pr: 12, pt: 22, pb: 26 };
+let gx = null;   // 현재 그래프 좌표 변환
+const f1 = n => n.toFixed(1);
+function chartSvg(gd, logs, cw) {
+  const { base, c } = gd, { W, H, pl, pr, pt, pb } = G;
+  let lo = base - 1, hi = base + c.total[1] + 1;
+  logs.forEach(l => { lo = Math.min(lo, l.kg - 1); hi = Math.max(hi, l.kg + 1); });
+  lo = Math.floor(lo); hi = Math.ceil(hi);
+  const step = hi - lo <= 12 ? 2 : hi - lo <= 24 ? 4 : 5;
+  lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+  const x = w => pl + w / 40 * (W - pl - pr), y = k => pt + (hi - k) / (hi - lo) * (H - pt - pb);
+  gx = { x, y, base, c };
+  let o = `<svg class="chart" id="wchart" viewBox="0 0 ${W} ${H}" role="img" aria-label="주수별 권장 체중 그래프 (눌러서 주수 선택)">`;
+  o += `<rect x="${f1(x(13))}" y="${pt}" width="${f1(x(27) - x(13))}" height="${H - pt - pb}" fill="#ffffff" fill-opacity=".04"/>`;
+  [[0, 13, '1분기'], [13, 27, '2분기'], [27, 40, '3분기']].forEach(t => { o += `<text x="${f1((x(t[0]) + x(t[1])) / 2)}" y="${pt - 8}" text-anchor="middle">${t[2]}</text>`; });
+  for (let k = lo; k <= hi; k += step) o += `<line x1="${pl}" x2="${W - pr}" y1="${f1(y(k))}" y2="${f1(y(k))}" stroke="#383146" stroke-width=".8"/><text x="${pl - 5}" y="${f1(y(k) + 3.5)}" text-anchor="end">${k}</text>`;
+  [0, 10, 20, 30, 40].forEach(w => { o += `<text x="${f1(x(w))}" y="${H - pb + 17}" text-anchor="middle">${w}주</text>`; });
+  const up = [], dn = [], mid = [];
+  for (let w = 0; w <= 40; w += 0.5) { const r = range(w, c); up.push(f1(x(w)) + ',' + f1(y(base + r[1]))); dn.unshift(f1(x(w)) + ',' + f1(y(base + r[0]))); mid.push(f1(x(w)) + ',' + f1(y(base + (r[0] + r[1]) / 2))); }
+  o += `<polygon points="${up.concat(dn).join(' ')}" fill="#8fb8ff" fill-opacity=".22"/><polyline points="${mid.join(' ')}" fill="none" stroke="#8fb8ff" stroke-width="1.6" stroke-linejoin="round"/>`;
+  o += `<line x1="${pl}" x2="${W - pr}" y1="${f1(y(base))}" y2="${f1(y(base))}" stroke="#a59db5" stroke-width=".9" stroke-dasharray="2 3"/><text x="${W - pr}" y="${f1(y(base) + 13)}" text-anchor="end">임신 전 ${kg1(base)}</text>`;
+  const rE = range(40, c);
+  o += `<text x="${W - pr - 2}" y="${f1(y(base + rE[1]) - 6)}" text-anchor="end" style="fill:#8fb8ff;font-weight:700">${kg1(base + rE[0])}~${kg1(base + rE[1])}</text>`;
+  if (cw != null && cw <= 40) {
+    const tr = range(cw, c), r = cw > 34;
+    o += `<line x1="${f1(x(cw))}" x2="${f1(x(cw))}" y1="${pt}" y2="${H - pb}" stroke="#ff9db0" stroke-width="1.2" stroke-dasharray="3 3"/>
+      <text x="${f1(x(cw) + (r ? -4 : 4))}" y="${H - pb - 5}" text-anchor="${r ? 'end' : 'start'}" style="fill:#ff9db0;font-weight:700">오늘</text>
+      <circle cx="${f1(x(cw))}" cy="${f1(y(base + (tr[0] + tr[1]) / 2))}" r="3" fill="#1f1b27" stroke="#ff9db0" stroke-width="1.5"/>`;
   }
-  const g = ga(); if (g.days >= 0 && g.days <= 294) s += `<line x1="${f(X(g.days / 7))}" x2="${f(X(g.days / 7))}" y1="${T}" y2="${H - B}" stroke="#a59db5" stroke-dasharray="3 3" stroke-width="1"/>`;
-  if (pts.length > 1) s += `<polyline fill="none" stroke="#ff9db0" stroke-width="2" stroke-linejoin="round" points="${pts.map(q => f(X(q.w)) + ',' + f(Y(q.kg))).join(' ')}"/>`;
-  s += pts.map(q => `<circle cx="${f(X(q.w))}" cy="${f(Y(q.kg))}" r="3" fill="#ff9db0" stroke="#1f1b27" stroke-width="1.5"/>`).join('');
-  return s + `</svg><div class="note">분홍 선: 내 몸무게(kg) · 점선: 오늘${gi ? ' · 초록 띠: 임신 전 BMI 기준 참고 범위' : ''}</div>`;
+  const pts = logs.filter(l => l.w <= 40);
+  if (pts.length > 1) o += `<polyline points="${pts.map(l => f1(x(l.w)) + ',' + f1(y(l.kg))).join(' ')}" fill="none" stroke="#ff9db0" stroke-width="1.5" stroke-linejoin="round" opacity=".75"/>`;
+  o += pts.map(l => `<circle cx="${f1(x(l.w))}" cy="${f1(y(l.kg))}" r="4.2" fill="#ff9db0" stroke="#1f1b27" stroke-width="1.5"/>`).join('');
+  return o + '<g id="wcur"></g></svg>';
+}
+// 선택 주수(UI.selW)에 따라 바뀌는 부분
+function updSel() {
+  const gd = guide(); if (!gd || !gx || !$('#wcur')) return;
+  const { base, c } = gd, w = UI.selW, r = range(w, c), md = (r[0] + r[1]) / 2, { x, y } = gx;
+  const cx = x(w), yU = y(base + r[1]), yL = y(base + r[0]), yM = y(base + md), right = w < 30, bw = 46;
+  const bx = right ? cx + 6 : cx - bw - 6; let by = yU - 26; if (by < G.pt + 2) by = yL + 8;
+  $('#wcur').innerHTML = `<line x1="${f1(cx)}" x2="${f1(cx)}" y1="${G.pt}" y2="${G.H - G.pb}" stroke="#8fb8ff" stroke-width="1.3" opacity=".85"/>
+    <rect x="${f1(cx - 4)}" y="${f1(yU)}" width="8" height="${f1(Math.max(1.5, yL - yU))}" rx="2" fill="#8fb8ff" opacity=".35"/>
+    <circle cx="${f1(cx)}" cy="${f1(yM)}" r="4" fill="#8fb8ff" stroke="#1f1b27" stroke-width="1.5"/>
+    <rect x="${f1(bx)}" y="${f1(by)}" width="${bw}" height="18" rx="9" fill="#8fb8ff"/><text x="${f1(bx + bw / 2)}" y="${f1(by + 13)}" text-anchor="middle" style="fill:#15121a;font-weight:700">${kg1(base + md)}</text>`;
+  $('#wsel').innerHTML = `<div class="sub">${w}주 권장 체중</div><div class="big">${kg1(base + r[0])} ~ ${kg1(base + r[1])} kg</div><div class="sub">임신 전 +${kg1(r[0])}~${kg1(r[1])}kg · 중앙 ${kg1(base + md)}kg</div>`;
+  $('#wsl').value = w;
+  const g = ga(), cw = g && g.days >= 0 && g.days <= 294 ? g.days / 7 : null;
+  $('#wtoday').classList.toggle('on', cw != null && w === Math.min(40, Math.round(cw)));
+  const near = wlogs().filter(l => Math.abs(l.w - w) < 0.5), l = near[near.length - 1];
+  let s1 = '<span class="sub">이 주수에는 기록이 없어요</span>', s2 = '';
+  if (l) { const s = statusOf(l.kg, l.w, base, c), lr = range(Math.min(l.w, 40), c); s1 = `<i class="lg" style="background:#ff9db0"></i>${wd(l.w)} 기록 <b>${kg1(l.kg)}kg</b> · <b class="${s.cls}">${s.txt}</b> · 중앙 대비 ${sg(l.kg - base - (lr[0] + lr[1]) / 2)}`; }
+  if (cw != null && cw <= 40) { const tr = range(cw, c); s2 = `<i class="lg" style="border:1.5px dashed #ff9db0"></i>오늘 ${g.w}주 ${g.d}일 정상 ${kg1(base + tr[0])}~${kg1(base + tr[1])}kg · 중앙 <b>${kg1(base + (tr[0] + tr[1]) / 2)}kg</b>`; }
+  $('#wst').innerHTML = `<div>${s1}</div><div>${s2 || '&nbsp;'}</div>`;
+  // 무게 구성
+  const p = comp(w), rest = Math.max(0, md - p.baby - p.pla - p.mat), parts = [[p.baby, '#ff9db0', '아기'], [p.pla, '#e9a23b', '태반·양수'], [p.mat, '#b9a7f0', '자궁·혈액 등'], [rest, '#8fb8ff', '엄마 순수']];
+  const tot = Math.max(0.001, parts.reduce((a, b) => a + b[0], 0));
+  $('#wcomp').innerHTML = `<div class="sub">${w}주 · 권장 중앙 +${kg1(md)}kg 기준</div><div class="cbar">${parts.map(q => `<i style="width:${q[0] / tot * 100}%;background:${q[1]}"></i>`).join('')}</div>
+    <div class="clg">${parts.map(q => `<span><i class="lg" style="background:${q[1]}"></i>${q[2]} ${fw(q[0])}</span>`).join('')}</div>` +
+    (l ? `<div class="note">${wd(l.w)} 기록 <b>${kg1(l.kg)}kg</b> − 임신 관련 ${kg1(pregKg(l.w))}kg = 순수 몸무게 <b>${kg1(l.kg - pregKg(l.w))}kg</b> (임신 전 대비 ${sg(l.kg - pregKg(l.w) - base)}kg)</div>` : '');
+  $('#wtbl').innerHTML = '<tr><th>주수</th><th>권장 증가</th><th>권장 체중</th></tr>' + [4, 8, 12, 16, 20, 24, 28, 32, 36, 40].map(t => { const q = range(t, c);
+    return `<tr class="${Math.abs(t - w) < 2 ? 'cur' : ''}"><td>${t}주</td><td>+${kg1(q[0])}~${kg1(q[1])}</td><td>${kg1(base + q[0])}~${kg1(base + q[1])}</td></tr>`; }).join('');
+}
+function setSelW(w) { w = Math.max(0, Math.min(40, Math.round(w))); if (w !== UI.selW) { UI.selW = w; updSel(); } }
+function weekFromEvent(e) { const r = $('#wchart').getBoundingClientRect(), xx = (e.clientX - r.left) / (r.width / G.W); return (xx - G.pl) / (G.W - G.pl - G.pr) * 40; }
+function stdChips() {
+  return `<div class="pick std">${[['auto', '자동'], ...Object.keys(STDS).map(k => [k, STDS[k].name])].map(([k, n]) => `<button type="button" class="${stdSel() === k ? 'on' : ''}" data-act="std" data-id="${k}">${n}</button>`).join('')}</div><div class="note">${h(stdNote())}</div>`;
+}
+function weightRows(gd) {
+  const ls = wlogs(), byId = new Map(ls.map(l => [l.id, l])), ws = [...S.weights].sort((a, b) => b.date.localeCompare(a.date));
+  return ws.map(r => { const l = byId.get(r.id); let info = '';
+    if (gd && l) { const { base, c } = gd, s = statusOf(l.kg, l.w, base, c), lr = range(Math.min(l.w, 40), c), md = base + (lr[0] + lr[1]) / 2;
+      info = `<div class="sub"><b class="${s.cls}">${s.txt}</b> · 정상 ${kg1(base + lr[0])}~${kg1(base + lr[1])}kg · 중앙 대비 ${sg(l.kg - md)}</div><div class="sub">아기 약 ${fw(comp(l.w).baby)} · 순수 몸무게 ${kg1(l.kg - pregKg(l.w))}kg (${sg(l.kg - pregKg(l.w) - base)})</div>`; }
+    return `<div class="row" data-act="edit" data-store="weights" data-id="${h(r.id)}"><div class="mid"><div class="nm">${fmtD(r.date)} <span class="sub">${l ? wd(l.w) : gaLabel(r.date)}</span></div>${info}${r.note ? `<div class="sub">${h(r.note)}</div>` : ''}</div>
+      <div class="amt">${kg1(r.kg)}kg<small>${gd ? '임신 전 ' + sg(r.kg - gd.base) : ''}</small></div></div>`; }).join('') || '<div class="empty">오른쪽 위 ＋ 버튼으로 기록하세요</div>';
 }
 function vWeight() {
-  const p = prof(), ws = [...S.weights].sort((a, b) => b.date.localeCompare(a.date));
-  return `<div class="card"><h2>몸무게 변화</h2>${weightChart() || '<div class="empty">기록이 2개 이상 쌓이면 그래프가 보여요</div>'}</div>
-    <div class="card"><h2>기록 <small>${ws.length}개</small></h2>${ws.map((r, i) => { const prev = ws[i + 1];
-      return `<div class="row" data-act="edit" data-store="weights" data-id="${h(r.id)}"><div class="mid"><div class="nm">${fmtD(r.date)} <span class="sub">${gaLabel(r.date)}</span></div>${r.note ? `<div class="sub">${h(r.note)}</div>` : ''}</div>
-        <div class="amt">${kg1(r.kg)}kg<small>${prev ? (r.kg - prev.kg >= 0 ? '+' : '') + kg1(r.kg - prev.kg) : p.preWeight > 0 ? '임신 전 ' + (r.kg - p.preWeight >= 0 ? '+' : '') + kg1(r.kg - p.preWeight) : ''}</small></div></div>`; }).join('') || '<div class="empty">오른쪽 위 ＋ 버튼으로 기록하세요</div>'}</div>`;
+  const p = prof();
+  if (!p.dueDate) return `<div class="card"><div class="empty">출산 예정일을 먼저 입력하세요</div><button class="btn pri" data-act="profile">기본 정보 입력</button></div>`;
+  const gd = guide(), ls = wlogs();
+  if (!gd) return `<div class="card"><h2>체중 가이드</h2><p class="sub">키와 임신 전 몸무게를 넣으면 주수별 권장 체중 범위, 무게 구성(아기·태반·양수 등), 기록별 상태를 보여줘요.</p>
+    <button class="btn pri" data-act="profile">키·임신 전 몸무게 입력</button><button class="btn" data-act="bd-import">체중 가이드 앱 기록 가져오기</button></div>
+    <div class="card"><h2>기록 <small>${S.weights.length}개</small></h2>${weightRows(null)}</div>`;
+  const { base, c, bmi } = gd, g = ga(), cw = g.days >= 0 && g.days <= 294 ? g.days / 7 : null;
+  if (UI.selW == null) UI.selW = cw == null ? 20 : Math.min(40, Math.round(cw));
+  return `<div class="card"><h2>권장 기준</h2>${stdChips()}</div>
+    <div class="tiles"><div><span>임신 전 BMI</span><b>${kg1(bmi)}</b><small>${h(c.name)}</small></div>
+      <div><span>총 권장 증가</span><b>${c.total[0] === 0 ? c.total[1] + 'kg↓' : '+' + c.total[0] + '~' + c.total[1]}</b><small>kg</small></div>
+      <div><span>출산 무렵 목표</span><b>${kg1(base + c.total[0])}~${kg1(base + c.total[1])}</b><small>kg</small></div></div>
+    <div class="card"><div id="wsel"></div>${chartSvg(gd, ls, cw)}
+      <div class="slrow"><input type="range" id="wsl" min="0" max="40" step="1" value="${UI.selW}" aria-label="주수 선택">${cw != null && cw <= 40 ? `<button class="btn sm" id="wtoday" data-act="w-today">오늘</button>` : '<span id="wtoday"></span>'}</div>
+      <div id="wst" class="wst"></div>
+      <div class="note">그래프를 누르거나 밀면 주수를 고를 수 있어요 · 파란 띠: 권장 범위 · 분홍 점: 내 기록</div></div>
+    <div class="card"><h2>무게 구성</h2><div id="wcomp"></div><div class="note">아기: Hadlock 50백분위 · 태반·양수, 자궁·유방·혈액·체액: Hytten 값. 순수 몸무게 = 기록 체중 − 임신으로 늘어난 무게(추정)</div></div>
+    <div class="card"><h2>기록 <small>${S.weights.length}개</small></h2>${weightRows(gd)}</div>
+    <div class="card"><h2>주요 주수별 권장 체중</h2><table class="wtbl" id="wtbl"></table></div>
+    <div class="card"><h2>요약 공유</h2><div class="btns"><button class="btn" data-act="w-text">카톡용 글</button><button class="btn" data-act="w-img">요약 이미지</button></div><div id="wimg"></div></div>
+    <div class="note" style="padding:0 4px 8px">미국 IOM 기준은 2009년 이후 공식 개정이 없고, 한국은 별도 공식 기준 없이 주로 IOM을 따라요. 단태아 기준이에요. 권장 범위는 참고용이며 담당 의사 안내가 우선이에요.</div>`;
+}
+// 카톡용 글 요약
+function summaryText() {
+  const gd = guide(); if (!gd) return '';
+  const { base, c, bmi } = gd, g = ga(), t = new Date(), ls = wlogs();
+  const L = [`[임신 체중 요약] ${t.getFullYear()}.${t.getMonth() + 1}.${t.getDate()}${g.days >= 0 && g.days <= 294 ? ` · ${g.w}주 ${g.d}일` : ''}`];
+  L.push(`임신 전 ${kg1(base)}kg · BMI ${kg1(bmi)} ${c.name} (${STDS[stdKey()].name}${stdSel() === 'auto' ? ', 상한 최소 자동' : ''} 기준)`);
+  if (g.days >= 0 && g.days <= 280) { const r = range(g.days / 7, c); L.push(`오늘 정상 범위 ${kg1(base + r[0])}~${kg1(base + r[1])}kg (중앙 ${kg1(base + (r[0] + r[1]) / 2)}kg)`); }
+  const l = ls[ls.length - 1];
+  if (l) { const s = statusOf(l.kg, l.w, base, c), lr = range(Math.min(l.w, 40), c);
+    L.push(`최근 ${wd(l.w)} ${kg1(l.kg)}kg → ${s.txt} (임신 전 ${sg(l.kg - base)}kg, 중앙 대비 ${sg(l.kg - base - (lr[0] + lr[1]) / 2)})`);
+    L.push(`  └ 예상 아기 ${fw(comp(l.w).baby)} · 순수 몸무게 ${kg1(l.kg - pregKg(l.w))}kg (${sg(l.kg - pregKg(l.w) - base)})`); }
+  L.push(`출산 무렵 목표 ${kg1(base + c.total[0])}~${kg1(base + c.total[1])}kg`);
+  if (ls.length > 1) { L.push('', '기록'); ls.slice(-6).forEach(x => L.push(`· ${wd(x.w)} ${kg1(x.kg)}kg`)); }
+  return L.join('\n');
+}
+// 요약 이미지 1080×1350 (카톡 공유용, baekdo와 같은 배치)
+function makeSummaryImage() {
+  const gd = guide(); if (!gd) return null;
+  const { base, c, bmi } = gd, gg = ga(), cw = gg.days >= 0 && gg.days <= 294 ? gg.days / 7 : null, logs = wlogs();
+  const W = 1080, H = 1350, cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const g = cv.getContext('2d');
+  const C = { bg: '#F3F5F8', card: '#FFFFFF', ink: '#1D2540', muted: '#6B7390', line: '#DDE2EC', band: '#D9D3F5', accent: '#5A47C9', rose: '#D9466F', ok: '#2F8F6B', bad: '#C46A17', lo: '#5A47C9', tint: '#F6F4FD', amber: '#E9A23B' };
+  const SANS = '"Noto Sans KR","Malgun Gothic","Apple SD Gothic Neo",sans-serif', SERIF = 'Georgia,serif';
+  const font = (sz, wt, fam) => { g.font = (wt || 400) + ' ' + sz + 'px ' + (fam || SANS); };
+  const txt = (t, x, y, col, al) => { g.fillStyle = col; g.textAlign = al || 'left'; g.fillText(t, x, y); };
+  const rr = (x, y, w, hh, r, col) => { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + hh, r); g.arcTo(x + w, y + hh, x, y + hh, r); g.arcTo(x, y + hh, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); g.fillStyle = col; g.fill(); };
+  g.fillStyle = C.bg; g.fillRect(0, 0, W, H);
+  const t = new Date();
+  font(64, 700, SERIF); txt('임신 체중 요약', 72, 130, C.ink);
+  font(30, 500); txt(`${t.getFullYear()}.${t.getMonth() + 1}.${t.getDate()}${cw != null ? `  ·  ${gg.w}주 ${gg.d}일` : ''}  ·  ${STDS[stdKey()].name} 기준`, 72, 186, C.muted);
+  rr(56, 228, W - 112, 300, 32, C.card);
+  const last = logs[logs.length - 1];
+  if (last) {
+    const st = statusOf(last.kg, last.w, base, c), col = C[st.cls], lr = range(Math.min(last.w, 40), c);
+    font(28, 500); txt('최근 기록 · ' + wd(last.w), 104, 292, C.muted);
+    font(96, 700, SERIF); txt(kg1(last.kg), 104, 400, C.ink);
+    const wk = g.measureText(kg1(last.kg)).width; font(40, 500); txt('kg', 114 + wk, 400, C.muted);
+    font(30, 600); const pw = g.measureText(st.txt).width + 48; rr(104, 428, pw, 56, 28, col); txt(st.txt, 104 + pw / 2, 467, '#fff', 'center');
+    font(28, 500); txt(`정상 ${kg1(base + lr[0])}~${kg1(base + lr[1])}kg · 중앙 대비 ${sg(last.kg - base - (lr[0] + lr[1]) / 2)}`, 104 + pw + 20, 466, C.muted);
+  } else { font(34, 500); txt('아직 기록이 없어요', 104, 360, C.muted); }
+  if (cw != null && cw <= 40) {
+    const tr = range(cw, c);
+    font(26, 500); txt('오늘 정상 범위', W - 104, 292, C.muted, 'right');
+    font(44, 700); txt(`${kg1(base + tr[0])}~${kg1(base + tr[1])}`, W - 104, 350, C.accent, 'right');
+    font(26, 500); txt(`중앙 ${kg1(base + (tr[0] + tr[1]) / 2)}kg`, W - 104, 392, C.muted, 'right');
+  }
+  const tiles = [['임신 전', kg1(base) + 'kg', `BMI ${kg1(bmi)} ${c.name}`], ['출산 무렵 상한', kg1(base + c.total[1]) + 'kg', `증가 +${c.total[1]}kg 이내`]];
+  if (last) { const pure = last.kg - pregKg(last.w); tiles.push(['순수 몸무게', kg1(pure) + 'kg', '임신 전 대비 ' + sg(pure - base)]); }
+  else tiles.push(['총 권장 증가', `+${c.total[0]}~${c.total[1]}`, 'kg']);
+  const tw = (W - 112 - 32) / 3;
+  tiles.forEach((tl, i) => { const x = 56 + i * (tw + 16); rr(x, 552, tw, 170, 24, C.card);
+    font(26, 500); txt(tl[0], x + 32, 600, C.muted); font(44, 700); txt(tl[1], x + 32, 658, i === 1 ? C.rose : C.ink); font(24, 400); txt(tl[2], x + 32, 698, C.muted); });
+  rr(56, 746, W - 112, 380, 32, C.card);
+  const pl = 140, pr = 100, pt = 790, pb = 1070;
+  let lo = base - 1, hi = base + c.total[1] + 1;
+  logs.forEach(l => { lo = Math.min(lo, l.kg - 1); hi = Math.max(hi, l.kg + 1); });
+  const step = hi - lo <= 12 ? 2 : hi - lo <= 24 ? 4 : 5; lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+  const X = w => pl + w / 40 * (W - pl - pr), Y = k => pt + (hi - k) / (hi - lo) * (pb - pt);
+  g.fillStyle = C.tint; g.fillRect(X(13), pt, X(27) - X(13), pb - pt);
+  font(22, 400);
+  for (let k = lo; k <= hi; k += step) { g.strokeStyle = C.line; g.lineWidth = 1.5; g.beginPath(); g.moveTo(pl, Y(k)); g.lineTo(W - pr, Y(k)); g.stroke(); txt(String(k), pl - 14, Y(k) + 8, C.muted, 'right'); }
+  [0, 10, 20, 30, 40].forEach(w => txt(w + '주', X(w), pb + 36, C.muted, 'center'));
+  g.beginPath();
+  for (let w = 0; w <= 40; w += 0.5) { const r = range(w, c); g[w ? 'lineTo' : 'moveTo'](X(w), Y(base + r[1])); }
+  for (let w = 40; w >= 0; w -= 0.5) { const r = range(w, c); g.lineTo(X(w), Y(base + r[0])); }
+  g.closePath(); g.fillStyle = C.band; g.fill();
+  g.beginPath(); for (let w = 0; w <= 40; w += 0.5) { const r = range(w, c); g[w ? 'lineTo' : 'moveTo'](X(w), Y(base + (r[0] + r[1]) / 2)); }
+  g.strokeStyle = C.accent; g.lineWidth = 4; g.stroke();
+  const rE = range(40, c); font(24, 700); txt('상한 ' + kg1(base + rE[1]), W - pr, Y(base + rE[1]) - 16, C.rose, 'right');
+  if (cw != null && cw <= 40) { g.setLineDash([8, 8]); g.strokeStyle = C.rose; g.lineWidth = 2.5; g.beginPath(); g.moveTo(X(cw), pt); g.lineTo(X(cw), pb); g.stroke(); g.setLineDash([]); font(22, 700); txt('오늘', X(cw) + 8, pb - 10, C.rose); }
+  const pts = logs.filter(l => l.w <= 40);
+  if (pts.length > 1) { g.beginPath(); pts.forEach((l, i) => g[i ? 'lineTo' : 'moveTo'](X(l.w), Y(l.kg))); g.strokeStyle = C.rose; g.lineWidth = 3; g.stroke(); }
+  pts.forEach(l => { g.beginPath(); g.arc(X(l.w), Y(l.kg), 10, 0, 7); g.fillStyle = C.rose; g.fill(); g.lineWidth = 3; g.strokeStyle = '#fff'; g.stroke(); });
+  const cwk = cw != null ? Math.min(cw, 40) : last ? last.w : 20, p = comp(cwk), rc = range(cwk, c), mid = (rc[0] + rc[1]) / 2;
+  const rest = Math.max(0, mid - p.baby - p.pla - p.mat), parts = [[p.baby, C.rose, '아기'], [p.pla, C.amber, '태반·양수'], [p.mat, C.band, '자궁·혈액 등'], [rest, C.accent, '엄마 순수']];
+  const tot = parts.reduce((a, b) => a + b[0], 0) || 1;
+  rr(56, 1150, W - 112, 150, 32, C.card);
+  font(26, 600); txt(`무게 구성 · ${wd(cwk)} 권장 중앙 +${kg1(mid)}kg`, 96, 1198, C.ink);
+  const bx = 96, bw = W - 192; let x0 = bx;
+  g.save(); rr(bx, 1218, bw, 22, 11, C.line); g.clip();
+  parts.forEach(pp => { const ww = pp[0] / tot * bw; g.fillStyle = pp[1]; g.fillRect(x0, 1218, ww, 22); x0 += ww; });
+  g.restore();
+  font(23, 500); let lx = 96;
+  parts.forEach(pp => { g.fillStyle = pp[1]; g.fillRect(lx, 1258, 18, 18); const s2 = pp[2] + ' ' + fw(pp[0]); txt(s2, lx + 26, 1275, C.muted); lx += 26 + g.measureText(s2).width + 26; });
+  return cv;
+}
+async function shareSummaryImage() {
+  const cv = makeSummaryImage(); if (!cv) return;
+  const blob = await new Promise(r => cv.toBlob(r, 'image/png')); if (!blob) return toast('이미지를 만들지 못했어요');
+  const name = `임신체중요약_${ymd()}.png`, url = URL.createObjectURL(blob), box = $('#wimg');
+  if (box) box.innerHTML = `<img src="${url}" alt="임신 체중 요약 이미지" class="wimg"><div class="note">이미지를 길게 눌러 저장하거나 공유할 수도 있어요.</div>`;
+  let file = null; try { file = new File([blob], name, { type: 'image/png' }); } catch (e) { /* 미지원 */ }
+  if (file && navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file] }); } catch (e) { /* 취소 */ } return; }
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  toast('이미지를 저장했어요');
+}
+function shareSummaryText() {
+  const t = summaryText(); if (!t) return;
+  showSheet(`<h3>카톡용 요약</h3><div class="code">${h(t)}</div><button class="btn pri" data-a="send">보내기 (카톡 등)</button><button class="btn" data-a="copy">복사</button><button class="btn" data-a="x">닫기</button>`);
+  sheet.onclick = e => { const b = e.target.closest('[data-a]')?.dataset.a;
+    if (b === 'copy') copyText(t); else if (b === 'send') navigator.share ? navigator.share({ text: t }).catch(() => {}) : copyText(t); else if (b === 'x') closeSheet(); };
+}
+
+/* ---------- 체중 가이드(baekdo) 앱 기록 가져오기 ----------
+   백업 파일 {app:'baekdo-weight', base, height, due, std, logs:[{w,k}]} 또는 같은 주소(joonseonhwang.github.io)의 baekdo 저장소에서 읽는다.
+   주수 w → 날짜 = (체중 가이드의 예정일 − 280일) + round(w×7)일. 같은 날짜에 이미 기록이 있으면 건너뛴다. */
+async function readBaekdoLocal() {
+  try {
+    if (indexedDB.databases && (await indexedDB.databases()).some(d => d.name === 'baekdo-weight')) {
+      const st = await new Promise(res => { const r = indexedDB.open('baekdo-weight');
+        r.onsuccess = () => { const d = r.result; if (!d.objectStoreNames.contains('meta')) { d.close(); return res(null); }
+          const q = d.transaction('meta').objectStore('meta').get('state'); q.onsuccess = () => { d.close(); res(q.result || null); }; q.onerror = () => { d.close(); res(null); }; };
+        r.onerror = () => res(null); });
+      if (st && Array.isArray(st.logs)) return st;
+    }
+  } catch (e) { /* 읽기 실패 → localStorage 확인 */ }
+  try { const s = JSON.parse(localStorage.getItem('preg-weight-v1') || 'null'); if (s && Array.isArray(s.logs)) return s; } catch (e) { /* 없음 */ }
+  return null;
+}
+async function importBaekdo(o) {
+  const due = /^\d{4}-\d{2}-\d{2}$/.test(o.due || '') ? o.due : prof().dueDate;
+  if (!due) { toast('출산 예정일을 먼저 입력하세요'); return null; }
+  const lmp = dnum(due) - 280, have = new Set(S.weights.map(x => x.date));
+  const logs = (o.logs || []).filter(l => l && l.w >= 0 && l.w <= 42 && l.k > 20 && l.k < 300);
+  let n = 0, skip = 0;
+  for (const l of logs) {
+    const date = fromNum(lmp + Math.round(l.w * 7));
+    if (have.has(date)) { skip++; continue; }
+    have.add(date); await put('weights', { id: 'bd_' + date.replace(/-/g, ''), date, kg: Math.round(l.k * 10) / 10, note: '' }); n++;
+  }
+  const p = prof(), add = {};
+  if (!p.dueDate) add.dueDate = due;
+  if (!(p.height > 0) && parseFloat(o.height) > 0) add.height = parseFloat(o.height);
+  if (!(p.preWeight > 0) && parseFloat(o.base) > 0) add.preWeight = parseFloat(o.base);
+  if (!p.std && (o.std === 'auto' || STDS[o.std])) add.std = o.std;
+  if (Object.keys(add).length) await put('profile', { ...p, ...add, id: 'main' });
+  return { n, skip, prof: Object.keys(add).length, dueDiff: !!(p.dueDate && o.due && p.dueDate !== o.due) };
+}
+async function runBaekdoImport(o) {
+  const cnt = (o.logs || []).length;
+  if (!(await ask(`체중 가이드 기록 ${cnt}개를 열달노트 몸무게로 가져올까요?\n같은 날짜에 이미 기록이 있으면 건너뛰어요. 키·임신 전 몸무게가 비어 있으면 함께 채워요.`, '가져오기'))) return;
+  const r = await importBaekdo(o); if (!r) return;
+  toast(`몸무게 ${r.n}개를 가져왔어요${r.skip ? ` (같은 날짜 ${r.skip}개 건너뜀)` : ''}`);
+  if (r.dueDiff) setTimeout(() => toast('체중 가이드의 예정일이 열달노트와 달라요. 날짜는 체중 가이드 예정일 기준으로 맞췄어요'), 2600);
+  UI.rec = 'weight'; location.hash = '#/rec'; render();
 }
 function diaryList() {
   const a = [...S.diary].sort((x, y) => y.date.localeCompare(x.date)).filter(r => !UI.q || match([r.date, r.mood, (r.symptoms || []).join(' '), r.memo].join(' '), UI.q));
@@ -508,13 +762,14 @@ function vSet() {
       : `<p class="note">두 폰에서 같은 기록을 실시간으로 보려면 공유 저장소(Firebase, 무료)가 한 번 필요해요.</p>
          <button class="btn pri" data-act="sync-new">새 공유 시작 (저장소 주소 입력)</button><button class="btn" data-act="sync-join">공유 키로 연결 (배우자가 이미 시작함)</button><button class="btn" data-act="sync-help">저장소 만드는 방법</button>`) + `</div>
     <div class="card"><h2>백업</h2><div class="sub">마지막 백업: ${lb ? new Date(lb).toLocaleDateString('ko-KR') : '없음'}</div>
-      <button class="btn pri" data-act="export">백업 파일 내보내기</button><button class="btn" data-act="share">백업 파일 공유 (카톡 등)</button><button class="btn" data-act="import">백업 파일 불러오기</button></div>
+      <button class="btn pri" data-act="export">백업 파일 내보내기</button><button class="btn" data-act="share">백업 파일 공유 (카톡 등)</button><button class="btn" data-act="import">백업 파일 불러오기</button>
+      <button class="btn" data-act="bd-import">체중 가이드 앱 기록 가져오기</button><div class="note">이 폰에 설치된 '주수별 체중 가이드' 앱의 기록을 몸무게로 옮겨요. 그 앱의 백업 파일(체중기록_백업_….json)은 '백업 파일 불러오기'로 넣어도 돼요.</div></div>
     <div class="card"><h2>저장공간</h2><div class="sub" id="persist">확인 중…</div><button class="btn" data-act="persist">저장공간 보호 요청</button></div>
     <div class="card"><h2>데이터</h2><div class="sub">몸무게 ${S.weights.length} · 일정 ${S.events.length} · 일기 ${S.diary.length} · 태동 ${S.kicks.length} · 진통 ${S.contractions.length}</div>
       <button class="btn danger" data-act="wipe">이 폰의 기록 전체 삭제</button></div>
     <div class="card"><h2>정보 출처</h2><ul class="plain sub">
       <li>태아 발달(4~29주): MSD 매뉴얼 일반인용 「태아 발달 단계」</li><li>진료 간격·임신성 당뇨 검사·예방접종·엽산: MSD 매뉴얼 일반인용 「임신 중 치료」</li>
-      <li>권장 체중 증가: MSD 매뉴얼 표 「임신 중 체중 증가」</li><li>임신성 당뇨 검사 시기: 서울아산병원 「임신성 당뇨검사」</li>
+      <li>권장 체중 증가 기준: 일본산부인과학회 2021 · 중국 국가표준 2022 · 미국 IOM 2009 (기준값·계산 방식은 '주수별 체중 가이드' 앱 v1.3.1에서 옮김)</li><li>태아 체중: Hadlock 50백분위 · 태반·양수, 자궁·유방·혈액·체액 증가량: Hytten</li><li>임신성 당뇨 검사 시기: 서울아산병원 「임신성 당뇨검사」</li>
       <li>기형아 검사·정밀 초음파·GBS 검사 시기: 닥터나우 건강정보 「산전검사 시기와 항목」</li>
       <li>아기 크기 비유·길이·무게, 엄마 몸 변화·할 일 문구, 위험 증상, 태동·진통 기준, 체크리스트: 앱 제작 시 Claude가 일반 지식으로 작성 (외부 자료로 검증하지 않은 참고값)</li></ul>
       <div class="note">이 앱은 의료 기기가 아니에요. 진단·치료 판단은 담당 의사와 상의하세요. (2026-11-17 확인)</div></div>
@@ -532,7 +787,7 @@ function render() {
   document.querySelectorAll('#tabs a').forEach(a => a.classList.toggle('on', a.dataset.tab === r));
   $('#topact').innerHTML = TOP[r] ? TOP[r]() : '';
   const y = scrollY, q = document.activeElement?.id === 'q';
-  view.innerHTML = fn(); scrollTo(0, y);
+  view.innerHTML = fn(); if (r === 'rec' && UI.rec === 'weight') updSel(); scrollTo(0, y);
   if (q) { const el = $('#q'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }
   if (r === 'week') { const c = $('#wchips .on'); if (c) $('#wchips').scrollLeft = c.offsetLeft - $('#wchips').clientWidth / 2 + c.clientWidth / 2; }
   if (r === 'set' && navigator.storage?.persisted) navigator.storage.persisted().then(p => { const el = $('#persist'); if (el) el.textContent = p ? '보호됨 — 브라우저가 임의로 지우지 않아요' : '보호 안 됨 — 저장공간이 부족하면 지워질 수 있어요'; });
@@ -545,7 +800,12 @@ $('#topact').addEventListener('click', e => {
   const t = e.target.closest('[data-top]')?.dataset.top;
   if (t === 'w') editWeight(); else if (t === 'd') editDiary(); else if (t === 'e') editEvent(); else if (t === 'c') editCheck();
 });
-view.addEventListener('input', e => { if (e.target.id === 'q') { UI.q = e.target.value; $('#dlist').innerHTML = diaryList(); } });
+view.addEventListener('input', e => { if (e.target.id === 'q') { UI.q = e.target.value; $('#dlist').innerHTML = diaryList(); } else if (e.target.id === 'wsl') setSelW(Number(e.target.value)); });
+// 그래프를 누르거나 옆으로 밀어 주수 선택 (세로로 밀면 화면 스크롤)
+let wdrag = false;
+view.addEventListener('pointerdown', e => { if (!e.target.closest('#wchart')) return; wdrag = true; setSelW(weekFromEvent(e)); });
+view.addEventListener('pointermove', e => { if (wdrag && $('#wchart')) setSelW(weekFromEvent(e)); });
+['pointerup', 'pointercancel', 'pointerleave'].forEach(t => view.addEventListener(t, () => { wdrag = false; }));
 function syncJoinForm() {
   openForm({ title: '공유 키로 연결', intro: '배우자 폰의 설정 → 부부 공유 → "공유 키 보기"에서 복사한 키를 붙여 넣으세요.', fields: [{ key: 'key', label: '공유 키', type: 'textarea', ph: 'yd1.…' }],
     check: o => parseKey(o.key) ? '' : '공유 키 형식이 맞지 않아요',
@@ -574,6 +834,12 @@ view.addEventListener('click', async e => {
   if (a === 'cat') { UI.cat = id; return render(); }
   if (a === 'past') { UI.past = !UI.past; return render(); }
   if (a === 'go-cal') { location.hash = '#/cal'; return; }
+  if (a === 'go-weight') { UI.rec = 'weight'; location.hash = '#/rec'; return render(); }
+  if (a === 'std') { await put('profile', { ...prof(), id: 'main', std: id }); return render(); }
+  if (a === 'w-today') { const g = ga(); return setSelW(g.days / 7); }
+  if (a === 'w-text') return shareSummaryText();
+  if (a === 'w-img') return shareSummaryImage();
+  if (a === 'bd-import') { const o = await readBaekdoLocal(); if (!o || !o.logs.length) return toast('이 폰의 체중 가이드 앱에 기록이 없어요. 체중 가이드 백업 파일은 "백업 파일 불러오기"로 넣을 수 있어요'); return runBaekdoImport(o); }
   if (a === 'go-kick' || a === 'go-con') { UI.rec = a === 'go-kick' ? 'kick' : 'con'; location.hash = '#/rec'; return render(); }
   if (a === 'ev-add') return editEvent();
   if (a === 'w-add') return editWeight();
@@ -617,5 +883,5 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) { if
   render();
   if (syncCfg()) syncStart();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-  window.X = { S, R, UI, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, APP_VERSION };
+  window.X = { S, R, UI, guide, range, statusOf, comp, pregKg, wlogs, stdKey, autoKey, summaryText, makeSummaryImage, importBaekdo, readBaekdoLocal, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, APP_VERSION };
 })();
