@@ -3,7 +3,7 @@
 // 기록은 이 기기의 IndexedDB에 저장한다. '부부 공유'를 켠 경우에만 사용자가 만든 Firebase 실시간 데이터베이스로 기록을 보낸다.
 // 주별 안내·검사 시기 내용과 그 출처는 data.js 참고.
 'use strict';
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 const DB_NAME = 'yeoldal-note';
 const STORES = ['profile', 'weights', 'events', 'diary', 'kicks', 'contractions', 'checks'];
 const DAY = 86400000;
@@ -325,7 +325,10 @@ function editProfile() {
       { key: 'lmp', label: '마지막 생리 시작일 (예정일을 모를 때만)', type: 'date', hint: '예정일이 비어 있으면 이 날짜 + 280일로 계산해요' },
       { key: 'babyName', label: '태명', ph: '예: 튼튼이' }, { key: 'height', label: '키 (cm)', type: 'number', ph: '예: 162' },
       { key: 'preWeight', label: '임신 전 몸무게 (kg)', type: 'number', ph: '예: 55.0', hint: '키와 임신 전 몸무게를 넣으면 권장 체중 증가 범위를 보여줘요' }],
-    check: o => { if (!o.dueDate && o.lmp) o.dueDate = fromNum(dnum(o.lmp) + 280); return o.dueDate ? '' : '출산 예정일을 입력하세요'; },
+    check: o => { if (!o.dueDate && o.lmp) o.dueDate = fromNum(dnum(o.lmp) + 280); if (!o.dueDate) return '출산 예정일을 입력하세요';
+      if (o.height != null && !(o.height > 100 && o.height < 230)) return '키를 확인하세요 (cm, 예: 160)';
+      if (o.preWeight != null && !(o.preWeight > 25 && o.preWeight < 250)) return '임신 전 몸무게를 확인하세요 (kg, 예: 55.0)';
+      return ''; },
     onSave: async o => { await put('profile', { ...o, id: 'main' }); if (route() !== 'set') location.hash = '#/home'; },
   });
 }
@@ -678,7 +681,7 @@ async function importBaekdo(o) {
   }
   const p = prof(), add = {};
   if (!p.dueDate) add.dueDate = due;
-  if (!(p.height > 0) && parseFloat(o.height) > 0) add.height = parseFloat(o.height);
+  if (!(p.height > 100 && p.height < 230) && parseFloat(o.height) > 100 && parseFloat(o.height) < 230) add.height = parseFloat(o.height);
   if (!(p.preWeight > 0) && parseFloat(o.base) > 0) add.preWeight = parseFloat(o.base);
   if (!p.std && (o.std === 'auto' || STDS[o.std])) add.std = o.std;
   if (Object.keys(add).length) await put('profile', { ...p, ...add, id: 'main' });
