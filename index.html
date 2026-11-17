@@ -1,0 +1,33 @@
+<!doctype html>
+<!-- 열달노트 — 임신 주차·기록·일정 관리 앱 (부부 공유)
+     출처: [Claude] 설계·작성 / [사용자] 요구사항(2026-11-17 대화). 개인 데이터는 코드에 없음(앱에서 입력·백업 JSON으로 불러옴).
+     주별 안내 내용의 출처는 data.js 상단과 앱 설정 화면의 '정보 출처'에 있음. -->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#15121a">
+<title>열달노트</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header id="top"><h1 id="title">열달노트</h1><div id="topact"></div></header>
+<main id="view"></main>
+<nav id="tabs">
+  <a href="#/home" data-tab="home"><span>🤍</span>홈</a>
+  <a href="#/week" data-tab="week"><span>🌱</span>주별</a>
+  <a href="#/rec" data-tab="rec"><span>📝</span>기록</a>
+  <a href="#/cal" data-tab="cal"><span>📅</span>일정</a>
+  <a href="#/chk" data-tab="chk"><span>✅</span>체크</a>
+</nav>
+<div id="sheet-bg" hidden></div>
+<section id="sheet" hidden role="dialog" aria-modal="true"></section>
+<div id="toast" hidden></div>
+<input type="file" id="file" accept="application/json,.json" hidden>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
