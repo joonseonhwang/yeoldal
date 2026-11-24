@@ -1,6 +1,6 @@
 // 열달노트 서비스워커 — 출처: [Claude] 작성
 // 배포할 때마다 CACHE 이름과 app.js의 APP_VERSION을 함께 올린다.
-const CACHE = 'yeoldal-note-v1.2.0';
+const CACHE = 'yeoldal-note-v1.2.1';
 const FILES = ['./', 'index.html', 'styles.css', 'data.js', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png'];
 
@@ -73,6 +73,34 @@ async function checkDaily() {
   } finally { db.close(); }
 }
 self.addEventListener('periodicsync', e => { if (e.tag === 'daily-check') e.waitUntil(checkDaily()); });
+
+/* ---------- 정확한 시각 알림 (집 PC의 yeoldal_push.py가 보낸 푸시) ----------
+   보낸 내용: {type:'daily', date, slot, items:[{id,name}]} 또는 {type:'test'}.
+   폰에 남은 기록으로 한 번 더 확인해서, 그사이 체크한 항목은 빼고 알린다. */
+async function onPush(d) {
+  const notif = (title, body, tag) => self.registration.showNotification(title, { body, tag, icon: 'icons/icon-192.png', data: { url: './#/home' } });
+  if (d.type === 'test') return notif('열달노트 · 테스트 알림', '앱을 꺼 둬도 정한 시각에 이렇게 알림이 와요', 'daily-test');
+  if (d.type !== 'daily' || !['am', 'pm'].includes(d.slot) || !Array.isArray(d.items)) return;
+  let items = d.items, db = null, sent = null;
+  try {
+    db = await openDb();
+    if (db) {
+      const t = db.transaction(['checks', 'meta']);
+      const [recs, notify, sentRec] = await Promise.all([req(t.objectStore('checks').getAll(IDBKeyRange.bound(`dd-${d.date}-`, `dd-${d.date}-￿`))), req(t.objectStore('meta').get('notify')), req(t.objectStore('meta').get('notified'))]);
+      if (notify?.value && !notify.value.on) return;   // 이 폰에서 알림을 끔
+      const done = new Set((recs || []).filter(r => r.done && !r.deleted).map(r => r.item));
+      items = items.filter(i => !done.has(i.id));
+      sent = sentRec?.value || {};
+    }
+    if (!items.length) return;   // 그사이 다 체크함
+    await notif(`열달노트 · ${SLOT[d.slot]} 챙길 것`, items.map(i => i.name).join(', ') + ' — 아직 체크 안 했어요', 'daily-' + d.slot);
+    if (db && sent) { sent[`${d.date}-${d.slot}`] = Date.now(); await new Promise(res => { const w = db.transaction('meta', 'readwrite'); w.objectStore('meta').put({ key: 'notified', value: sent }); w.oncomplete = w.onerror = () => res(); }); }
+  } finally { db?.close(); }
+}
+self.addEventListener('push', e => {
+  let d = {}; try { d = e.data ? e.data.json() : {}; } catch (x) { /* 형식 오류 */ }
+  e.waitUntil(onPush(d));
+});
 self.addEventListener('notificationclick', e => {
   e.notification.close();
   const url = new URL(e.notification.data?.url || './#/home', self.registration.scope).href;

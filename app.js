@@ -3,7 +3,7 @@
 // 기록은 이 기기의 IndexedDB에 저장한다. '부부 공유'를 켠 경우에만 사용자가 만든 Firebase 실시간 데이터베이스로 기록을 보낸다.
 // 주별 안내·검사 시기 내용과 그 출처는 data.js 참고.
 'use strict';
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 const DB_NAME = 'yeoldal-note';
 const STORES = ['profile', 'weights', 'events', 'diary', 'kicks', 'contractions', 'checks'];
 const DAY = 86400000;
@@ -247,7 +247,9 @@ const okUrl = u => /^https:\/\/[^\s/]+\.[^\s/]+/.test(u || '') || /^http:\/\/(lo
 async function syncConnect(cfg) {
   try { const r = await fetch(`${cfg.url.replace(/\/+$/, '')}/rooms/${cfg.code}/profile.json`); if (!r.ok) throw new Error(r.status); }
   catch (e) { toast('연결하지 못했어요. 주소와 보안 규칙을 확인하세요'); return false; }
-  await setMeta('sync', cfg); syncStart(); return true;
+  await setMeta('sync', cfg); syncStart();
+  if (S.meta.notify?.on) pushOn().then(push => setMeta('notify', { ...S.meta.notify, push }));
+  return true;
 }
 const RULES = '{\n  "rules": {\n    "rooms": {\n      "$code": {\n        ".read": "$code.length >= 16",\n        ".write": "$code.length >= 16"\n      }\n    }\n  }\n}';
 
@@ -410,6 +412,40 @@ async function notifyCheck() {
   }
   if (changed) { for (const k of Object.keys(sent)) if (Date.now() - sent[k] > 7 * DAY) delete sent[k]; await setMeta('notified', sent); }
 }
+/* 정확한 시각 알림: 이 폰의 '알림 받을 주소'(웹 푸시 구독)를 공유 저장소 push/<기기id>에 올리면,
+   24시간 켜 둔 PC의 발송 프로그램(yeoldal_push.py)이 정한 시각에 체크 기록을 보고 안 한 게 있으면 알림을 보낸다.
+   아래는 공개 열쇠(공개돼도 됨). 짝이 되는 비밀 열쇠는 발송 PC에만 있다. */
+const VAPID_PUBLIC = 'BGLneECTpSbOg2liwse7zi2kBkCQjPjWgscqx6H0xGHB-mfGABV2_SzrjTs_HxqGPAXDhK_Dk6XNnTJxnJe8Pys';
+const b64u = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
+async function devId() { if (!S.meta.devId) await setMeta('devId', 'p' + uid()); return S.meta.devId; }
+async function pushOn() {
+  if (!syncCfg()) return 'nosync';
+  try {
+    const reg = await navigator.serviceWorker.ready; if (!reg.pushManager) return 'unsupported';
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey || []))).replace(/=+$/, '') !== btoa(String.fromCharCode(...b64u(VAPID_PUBLIC))).replace(/=+$/, '')) { await sub.unsubscribe(); sub = null; }
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(VAPID_PUBLIC) });
+    const r = await fetch(`${syncBase()}/push/${await devId()}.json`, { method: 'PATCH', body: JSON.stringify({ sub: sub.toJSON(), updatedAt: Date.now() }) });
+    return r.ok ? 'on' : 'fail';
+  } catch (e) { return 'fail'; }
+}
+async function pushOff() {
+  try { const reg = await navigator.serviceWorker.ready; const sub = await reg.pushManager?.getSubscription(); if (sub) await sub.unsubscribe(); } catch (e) { /* 없음 */ }
+  if (syncCfg() && S.meta.devId) try { await fetch(`${syncBase()}/push/${S.meta.devId}.json`, { method: 'DELETE' }); } catch (e) { /* 오프라인 */ }
+}
+// 발송 PC가 5분마다 남기는 '살아 있음' 시각
+let srvAt = null;
+async function pushSrvCheck() {
+  if (!syncCfg()) return;
+  try { const r = await fetch(`${syncBase()}/pushsrv.json`); const o = r.ok ? await r.json() : null; srvAt = o?.at || 0; } catch (e) { srvAt = null; }
+  const el = $('#pushsrv'); if (el) el.innerHTML = srvLine();
+}
+function srvLine() {
+  if (srvAt === null) return '알림 보내는 PC: 확인 중…';
+  if (!srvAt) return '<b class="bad">알림 보내는 PC: 아직 연결된 적 없음</b>';
+  const m = Math.round((Date.now() - srvAt) / 60000);
+  return m <= 12 ? `<b class="ok">알림 보내는 PC: 켜져 있음</b> <span class="sub">(${m}분 전 확인)</span>` : `<b class="bad">알림 보내는 PC: ${m >= 120 ? Math.round(m / 60) + '시간' : m + '분'} 동안 응답 없음 — 꺼져 있으면 정확한 시각 알림이 안 와요</b>`;
+}
 async function periodicOn() {
   try {
     const reg = await navigator.serviceWorker.ready;
@@ -425,12 +461,16 @@ async function enableNotify() {
   if (!('Notification' in window) || !('serviceWorker' in navigator)) return toast('이 브라우저는 알림을 지원하지 않아요');
   const p = await Notification.requestPermission();
   if (p !== 'granted') return toast('알림이 허용되지 않았어요. 폰 설정 → 애플리케이션 → 열달노트(또는 Chrome) → 알림에서 켜 주세요');
-  const bg = await periodicOn();
-  await setMeta('notify', { on: true, bg });
-  toast(bg === 'on' ? '알림을 켰어요' : '알림을 켰어요 (앱을 열 때 확인해요)'); render();
+  const bg = await periodicOn(), push = await pushOn();
+  await setMeta('notify', { on: true, bg, push });
+  toast(push === 'on' ? '알림을 켰어요. 앱을 꺼 둬도 정한 시각에 와요' : push === 'nosync' ? '알림을 켰어요. 정확한 시각 알림은 부부 공유를 켜야 돼요' : '알림을 켰어요 (정확한 시각 알림 등록은 실패 — 인터넷 확인 후 다시 켜 주세요)'); render(); pushSrvCheck();
 }
 async function testNotify() {
   if (!notifyOn()) return toast('먼저 알림을 켜 주세요');
+  if (S.meta.notify.push === 'on' && syncCfg()) {
+    try { const r = await fetch(`${syncBase()}/push/${await devId()}.json`, { method: 'PATCH', body: JSON.stringify({ testAt: Date.now() }) }); if (!r.ok) throw 0;
+      return toast('PC에 테스트 알림을 요청했어요. 앱을 닫고 기다리면 30초 안에 와요'); } catch (e) { toast('요청 실패 — 이 폰에서 바로 띄워요'); }
+  }
   const reg = await navigator.serviceWorker.ready, miss = dailyItems().filter(i => !ddDone(i.id));
   await reg.showNotification('열달노트 · 테스트 알림', { body: miss.length ? `오늘 남은 것: ${miss.map(i => i.name).join(', ')}` : '오늘 다 챙겼어요 👍', tag: 'daily-test', icon: 'icons/icon-192.png', data: { url: './#/home' } });
 }
@@ -454,17 +494,18 @@ function vDailyCard() {
 }
 function vDailySet() {
   const t = dailyTime(), n = S.meta.notify, on = notifyOn(), perm = 'Notification' in window ? Notification.permission : 'none';
-  const st = on ? (n.bg === 'on' ? '켜짐 — 앱을 닫아 둬도 폰이 가끔 확인해요' : '켜짐 — 앱을 열 때 확인해요') : perm === 'denied' ? '차단됨 — 폰 설정에서 알림을 허용해 주세요' : '꺼짐';
+  const st = on ? (n.push === 'on' ? '켜짐 — 앱을 꺼 둬도 정한 시각에 와요' : n.push === 'nosync' ? '켜짐 — 앱을 열 때만 확인 (정확한 시각 알림은 부부 공유가 필요해요)' : '켜짐 — 정확한 시각 알림 등록 안 됨 (알림 끄기 → 켜기로 다시 시도)') : perm === 'denied' ? '차단됨 — 폰 설정에서 알림을 허용해 주세요' : '꺼짐';
   return `<div class="card" id="dailyset"><h2>매일 체크리스트 · 알림</h2>
     <div class="kv"><span>🌅 아침 알림 (이때까지 안 하면)</span><b>${h(t.am)}</b></div><div class="kv"><span>🌙 저녁 알림 (이때까지 안 하면)</span><b>${h(t.pm)}</b></div>
     <button class="btn" data-act="daily-time">알림 시각 바꾸기</button>
     <div class="sub" style="margin-top:10px">이 폰 알림: <b class="${on ? 'ok' : ''}">${st}</b></div>
+    ${on && n.push === 'on' ? `<div class="sub" id="pushsrv">${srvLine()}</div>` : ''}
     ${on ? '<div class="btns"><button class="btn" data-act="notify-test">테스트 알림</button><button class="btn" data-act="notify-off">알림 끄기</button></div>' : '<button class="btn pri" data-act="notify-on">알림 켜기</button>'}
     <div class="lbl">항목 <span class="sub">(누르면 수정)</span></div>
     ${dailyItems().map(i => `<div class="row" data-act="daily-edit" data-id="${h(i.id)}"><span class="tag">${SLOT_NAME[i.slot]}</span><div class="mid"><div class="nm">${h(i.name)}</div></div><div class="amt sub">수정 ›</div></div>`).join('') || '<div class="empty">항목이 없어요</div>'}
     <button class="btn" data-act="daily-add">＋ 항목 추가</button>
     <button class="btn" data-act="daily-ics">폰 달력에 매일 알람 넣기</button>
-    <div class="note">앱 알림은 체크하지 않은 항목이 있을 때만 와요. 다만 앱을 닫아 두면 폰(크롬)이 확인하는 때를 정해서 늦게 오거나 안 올 수 있어요. 정확한 시각이 꼭 필요하면 '폰 달력에 매일 알람 넣기'를 같이 쓰세요(달력 알람은 체크해도 울려요).</div></div>`;
+    <div class="note">알림은 정한 시각까지 체크하지 않은 항목이 있을 때만 와요. 앱을 꺼 둬도 집 PC가 정한 시각에 보내 줘요(그 PC가 켜져 있고 인터넷이 될 때). PC가 꺼져 있을 때를 대비하려면 '폰 달력에 매일 알람 넣기'를 같이 쓰세요(달력 알람은 체크해도 울려요).</div></div>`;
 }
 function editDaily(item) {
   openForm({
@@ -929,6 +970,7 @@ function render() {
   view.innerHTML = fn(); if (r === 'rec' && UI.rec === 'weight') updSel(); scrollTo(0, y);
   if (q) { const el = $('#q'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }
   if (r === 'week') { const c = $('#wchips .on'); if (c) $('#wchips').scrollLeft = c.offsetLeft - $('#wchips').clientWidth / 2 + c.clientWidth / 2; }
+  if (r === 'set' && S.meta.notify?.push === 'on') pushSrvCheck();
   if (r === 'set' && navigator.storage?.persisted) navigator.storage.persisted().then(p => { const el = $('#persist'); if (el) el.textContent = p ? '보호됨 — 브라우저가 임의로 지우지 않아요' : '보호 안 됨 — 저장공간이 부족하면 지워질 수 있어요'; });
 }
 window.addEventListener('hashchange', () => { scrollTo(0, 0); render(); });
@@ -973,7 +1015,7 @@ view.addEventListener('click', async e => {
   if (a === 'daily-ics') return shareIcs();
   if (a === 'notify-on') return enableNotify();
   if (a === 'notify-test') return testNotify();
-  if (a === 'notify-off') { await periodicOff(); await setMeta('notify', { on: false }); toast('이 폰의 알림을 껐어요'); return render(); }
+  if (a === 'notify-off') { await periodicOff(); await pushOff(); await setMeta('notify', { on: false }); toast('이 폰의 알림을 껐어요'); return render(); }
   if (a === 'ev-toggle') { const r = S.events.find(x => x.id === id); await put('events', { ...r, done: !r.done }); return render(); }
   if (a === 'edit') { const r = S[el.dataset.store].find(x => x.id === id); return r && EDIT[el.dataset.store](r); }
   if (a === 'profile') return editProfile();
@@ -1032,7 +1074,8 @@ setInterval(() => notifyCheck(), 60000);
   render();
   if (syncCfg()) syncStart();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-  if (S.meta.notify?.on && 'Notification' in window && Notification.permission === 'granted') periodicOn().then(bg => { if (bg !== S.meta.notify.bg) setMeta('notify', { ...S.meta.notify, bg }); });
+  if (S.meta.notify?.on && 'Notification' in window && Notification.permission === 'granted')
+    Promise.all([periodicOn(), pushOn()]).then(([bg, push]) => { if (bg !== S.meta.notify.bg || push !== S.meta.notify.push) setMeta('notify', { ...S.meta.notify, bg, push }).then(() => route() === 'set' && render()); });
   setTimeout(notifyCheck, 1500);
-  window.X = { S, R, UI, guide, range, statusOf, comp, pregKg, wlogs, stdKey, autoKey, summaryText, makeSummaryImage, importBaekdo, readBaekdoLocal, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, dailyItems, dailyTime, dailyMissing, toggleDaily, ddDone, dailyIcs, notifyCheck, APP_VERSION };
+  window.X = { S, R, UI, guide, range, statusOf, comp, pregKg, wlogs, stdKey, autoKey, summaryText, makeSummaryImage, importBaekdo, readBaekdoLocal, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, dailyItems, dailyTime, dailyMissing, toggleDaily, ddDone, dailyIcs, notifyCheck, pushOn, pushOff, VAPID_PUBLIC, APP_VERSION };
 })();
