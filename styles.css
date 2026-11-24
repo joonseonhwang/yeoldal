@@ -139,3 +139,7 @@ ul.plain li{margin:3px 0}
 .dweek div.some{background:rgba(255,170,60,.18);color:var(--tx)}
 .dweek div.all{background:var(--ok);color:#06220f}
 #daily h2 small{margin-left:6px;margin-right:auto}
+/* 아침·저녁 한 번에 체크 (v1.2.2) */
+.dslot{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.dall{font:inherit;font-size:13px;font-weight:700;color:#fff;background:var(--acc);border:0;border-radius:999px;padding:7px 12px;min-height:34px;white-space:nowrap;cursor:pointer}
+.dall.off{background:var(--line);color:var(--sub)}

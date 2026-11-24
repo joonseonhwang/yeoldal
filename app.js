@@ -3,7 +3,7 @@
 // 기록은 이 기기의 IndexedDB에 저장한다. '부부 공유'를 켠 경우에만 사용자가 만든 Firebase 실시간 데이터베이스로 기록을 보낸다.
 // 주별 안내·검사 시기 내용과 그 출처는 data.js 참고.
 'use strict';
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.2.2';
 const DB_NAME = 'yeoldal-note';
 const STORES = ['profile', 'weights', 'events', 'diary', 'kicks', 'contractions', 'checks'];
 const DAY = 86400000;
@@ -383,6 +383,12 @@ const dailyTime = () => ({ ...DAILY_TIME, ...(prof().dailyTime || {}) });
 const ddId = (date, item) => `dd-${date}-${item}`;
 const ddDone = (item, date = iso()) => !!ck(ddId(date, item))?.done;
 const toggleDaily = (item, date = iso()) => put('checks', { id: ddId(date, item), kind: 'daily', date, item, done: !ddDone(item, date) });
+// 아침/저녁 한 번에: 안 한 게 있으면 전부 체크, 다 했으면 전부 해제
+async function slotAll(slot, date = iso()) {
+  const its = dailyItems().filter(i => i.slot === slot), all = its.every(i => ddDone(i.id, date));
+  for (const i of its) if (ddDone(i.id, date) === all) await put('checks', { id: ddId(date, i.id), kind: 'daily', date, item: i.id, done: !all });
+  return !all;
+}
 const nowHM = (d = new Date()) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 // 알림 시각이 지났는데 안 한 항목 (slot별)
 function dailyMissing(now = new Date()) {
@@ -477,7 +483,8 @@ async function testNotify() {
 function dailyRows(slot) {
   const its = dailyItems().filter(i => i.slot === slot); if (!its.length) return '';
   const dn = its.filter(i => ddDone(i.id)).length, late = dn < its.length && nowHM() >= dailyTime()[slot];
-  return `<div class="lbl">${slot === 'am' ? '🌅' : '🌙'} ${SLOT_NAME[slot]} <span class="sub">${dn}/${its.length}${late ? ` · <b class="bad">${dailyTime()[slot]} 지남</b>` : ` · ${dailyTime()[slot]}까지`}</span></div>` +
+  return `<div class="lbl dslot"><span>${slot === 'am' ? '🌅' : '🌙'} ${SLOT_NAME[slot]} <span class="sub">${dn}/${its.length}${late ? ` · <b class="bad">${dailyTime()[slot]} 지남</b>` : ` · ${dailyTime()[slot]}까지`}</span></span>` +
+    `<button class="dall ${dn === its.length ? 'off' : ''}" data-act="daily-all" data-id="${slot}">${dn === its.length ? '모두 해제' : `${SLOT_NAME[slot]} 모두 체크`}</button></div>` +
     its.map(i => { const on = ddDone(i.id); return `<div class="row ${on ? 'done' : ''}" data-act="daily" data-id="${h(i.id)}">${chkBtn(on, 'daily', i.id)}<div class="mid"><div class="nm">${h(i.name)}</div></div><div class="amt sub">${on ? hm(ck(ddId(iso(), i.id)).updatedAt) : ''}</div></div>`; }).join('');
 }
 function dailyWeek() {
@@ -1008,6 +1015,7 @@ view.addEventListener('click', async e => {
   const a = el.dataset.act, id = el.dataset.id;
   if (a === 'check') { await toggleCheck(id); return render(); }
   if (a === 'daily') { await toggleDaily(id); return render(); }
+  if (a === 'daily-all') { const on = await slotAll(id); toast(`${SLOT_NAME[id]} 항목을 ${on ? '모두 체크했어요' : '모두 해제했어요'}`); return render(); }
   if (a === 'daily-set') { location.hash = '#/set'; setTimeout(() => $('#dailyset')?.scrollIntoView({ block: 'start' }), 50); return; }
   if (a === 'daily-edit') return editDaily(dailyItems().find(x => x.id === id));
   if (a === 'daily-add') return editDaily(null);
@@ -1077,5 +1085,5 @@ setInterval(() => notifyCheck(), 60000);
   if (S.meta.notify?.on && 'Notification' in window && Notification.permission === 'granted')
     Promise.all([periodicOn(), pushOn()]).then(([bg, push]) => { if (bg !== S.meta.notify.bg || push !== S.meta.notify.push) setMeta('notify', { ...S.meta.notify, bg, push }).then(() => route() === 'set' && render()); });
   setTimeout(notifyCheck, 1500);
-  window.X = { S, R, UI, guide, range, statusOf, comp, pregKg, wlogs, stdKey, autoKey, summaryText, makeSummaryImage, importBaekdo, readBaekdoLocal, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, dailyItems, dailyTime, dailyMissing, toggleDaily, ddDone, dailyIcs, notifyCheck, pushOn, pushOff, VAPID_PUBLIC, APP_VERSION };
+  window.X = { S, R, UI, guide, range, statusOf, comp, pregKg, wlogs, stdKey, autoKey, summaryText, makeSummaryImage, importBaekdo, readBaekdoLocal, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, dailyItems, dailyTime, dailyMissing, toggleDaily, slotAll, ddDone, dailyIcs, notifyCheck, pushOn, pushOff, VAPID_PUBLIC, APP_VERSION };
 })();
