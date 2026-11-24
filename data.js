@@ -111,3 +111,14 @@ const CHECKLIST = {
     ['baby6', '가제 손수건'], ['baby7', '배냇저고리·우주복'], ['baby8', '체온계'], ['baby9', '아기 욕조·세정제'], ['baby10', '아기 세탁 세제'],
   ],
 };
+
+// 매일 챙길 것 기본 목록 [사용자] 2026-11-25 요청 (앱 설정에서 추가·수정·삭제 가능). slot: am 아침 / pm 저녁
+const DAILY_DEFAULT = [
+  { id: 'dvitd', name: '비타민D', slot: 'am' }, { id: 'dfolic', name: '엽산', slot: 'am' },
+  { id: 'domega3', name: '오메가3', slot: 'am' }, { id: 'dmag', name: '마그네슘', slot: 'am' },
+  { id: 'dstretch', name: '튼살크림', slot: 'pm' }, { id: 'dwhite', name: '미백크림', slot: 'pm' },
+  { id: 'dneck', name: '목크림', slot: 'pm' }, { id: 'diron', name: '철분제', slot: 'pm' }, { id: 'dfoot', name: '발 크림', slot: 'pm' },
+];
+// 이 시각까지 다 체크하지 않으면 알림 [Claude] 기본값 — 설정에서 변경
+const DAILY_TIME = { am: '10:00', pm: '21:30' };
+const SLOT_NAME = { am: '아침', pm: '저녁' };

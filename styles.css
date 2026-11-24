@@ -131,3 +131,11 @@ ul.plain li{margin:3px 0}
 .wtbl td{padding:7px 4px;border-top:1px solid var(--line)}
 .wtbl tr.cur td{color:var(--blue);font-weight:700}
 .wimg{width:100%;border-radius:12px;margin-top:10px}
+/* 매일 체크리스트 — 최근 7일 */
+.dweek{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:12px}
+.dweek div{text-align:center;padding:6px 0;border-radius:10px;background:var(--line);font-size:12px;color:var(--sub)}
+.dweek div span{display:block}
+.dweek div b{font-size:12px}
+.dweek div.some{background:rgba(255,170,60,.18);color:var(--tx)}
+.dweek div.all{background:var(--ok);color:#06220f}
+#daily h2 small{margin-left:6px;margin-right:auto}

@@ -3,7 +3,7 @@
 // 기록은 이 기기의 IndexedDB에 저장한다. '부부 공유'를 켠 경우에만 사용자가 만든 Firebase 실시간 데이터베이스로 기록을 보낸다.
 // 주별 안내·검사 시기 내용과 그 출처는 data.js 참고.
 'use strict';
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.2.0';
 const DB_NAME = 'yeoldal-note';
 const STORES = ['profile', 'weights', 'events', 'diary', 'kicks', 'contractions', 'checks'];
 const DAY = 86400000;
@@ -372,6 +372,140 @@ const EDIT = { weights: editWeight, events: editEvent, diary: editDiary, checks:
 const ck = id => S.checks.find(c => c.id === id);
 const toggleCheck = id => put('checks', { ...(ck(id) || { id }), done: !ck(id)?.done });
 
+/* ---------- 매일 체크리스트 + 알림 ----------
+   항목 목록·알림 시각: profile.daily / profile.dailyTime (부부 공유됨, 없으면 data.js 기본값)
+   하루 기록: checks 저장소의 'dd-<날짜>-<항목id>' = { kind:'daily', date, item, done } — 항목마다 따로라 두 폰이 동시에 체크해도 안 덮어씀
+   알림 켜기·보낸 기록: meta 'notify' / 'notified' (이 폰에만). 서비스워커(sw.js)도 같은 규칙으로 백그라운드에서 확인한다. */
+const dailyItems = () => Array.isArray(prof().daily) ? prof().daily : DAILY_DEFAULT;
+const dailyTime = () => ({ ...DAILY_TIME, ...(prof().dailyTime || {}) });
+const ddId = (date, item) => `dd-${date}-${item}`;
+const ddDone = (item, date = iso()) => !!ck(ddId(date, item))?.done;
+const toggleDaily = (item, date = iso()) => put('checks', { id: ddId(date, item), kind: 'daily', date, item, done: !ddDone(item, date) });
+const nowHM = (d = new Date()) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+// 알림 시각이 지났는데 안 한 항목 (slot별)
+function dailyMissing(now = new Date()) {
+  const date = iso(now), t = dailyTime(), out = [];
+  for (const slot of ['am', 'pm']) {
+    if (nowHM(now) < t[slot]) continue;
+    const miss = dailyItems().filter(i => i.slot === slot && !ddDone(i.id, date));
+    if (miss.length) out.push({ slot, date, miss });
+  }
+  return out;
+}
+const saveDaily = (daily, extra = {}) => put('profile', { ...prof(), id: 'main', daily, ...extra });
+const notifyOn = () => !!S.meta.notify?.on && 'Notification' in window && Notification.permission === 'granted';
+async function notifyCheck() {
+  if (!db || !prof().dueDate && !Array.isArray(prof().daily)) return;
+  const due = dailyMissing(); if (!due.length) return;
+  // 서비스워커가 먼저 알렸을 수 있으니 저장소에서 다시 읽는다
+  const sent = await new Promise(res => { const r = db.transaction('meta').objectStore('meta').get('notified'); r.onsuccess = () => res(r.result?.value || {}); r.onerror = () => res({}); });
+  let changed = false;
+  for (const d of due) {
+    const key = `${d.date}-${d.slot}`; if (sent[key]) continue;
+    const body = d.miss.map(i => i.name).join(', ') + ' — 아직 체크 안 했어요';
+    if (!document.hidden) toast(`${SLOT_NAME[d.slot]}에 챙길 것 ${d.miss.length}개가 남았어요`);
+    else if (notifyOn()) { try { const reg = await navigator.serviceWorker.ready; await reg.showNotification(`열달노트 · ${SLOT_NAME[d.slot]} 챙길 것`, { body, tag: 'daily-' + d.slot, icon: 'icons/icon-192.png', data: { url: './#/home' } }); } catch (e) { continue; } }
+    else continue;
+    sent[key] = Date.now(); changed = true;
+  }
+  if (changed) { for (const k of Object.keys(sent)) if (Date.now() - sent[k] > 7 * DAY) delete sent[k]; await setMeta('notified', sent); }
+}
+async function periodicOn() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if (!reg.periodicSync) return 'unsupported';
+    const st = await navigator.permissions.query({ name: 'periodic-background-sync' });
+    if (st.state !== 'granted') return 'denied';
+    await reg.periodicSync.register('daily-check', { minInterval: 60 * 60 * 1000 });
+    return 'on';
+  } catch (e) { return 'unsupported'; }
+}
+async function periodicOff() { try { const reg = await navigator.serviceWorker.ready; await reg.periodicSync?.unregister('daily-check'); } catch (e) { /* 없음 */ } }
+async function enableNotify() {
+  if (!('Notification' in window) || !('serviceWorker' in navigator)) return toast('이 브라우저는 알림을 지원하지 않아요');
+  const p = await Notification.requestPermission();
+  if (p !== 'granted') return toast('알림이 허용되지 않았어요. 폰 설정 → 애플리케이션 → 열달노트(또는 Chrome) → 알림에서 켜 주세요');
+  const bg = await periodicOn();
+  await setMeta('notify', { on: true, bg });
+  toast(bg === 'on' ? '알림을 켰어요' : '알림을 켰어요 (앱을 열 때 확인해요)'); render();
+}
+async function testNotify() {
+  if (!notifyOn()) return toast('먼저 알림을 켜 주세요');
+  const reg = await navigator.serviceWorker.ready, miss = dailyItems().filter(i => !ddDone(i.id));
+  await reg.showNotification('열달노트 · 테스트 알림', { body: miss.length ? `오늘 남은 것: ${miss.map(i => i.name).join(', ')}` : '오늘 다 챙겼어요 👍', tag: 'daily-test', icon: 'icons/icon-192.png', data: { url: './#/home' } });
+}
+function dailyRows(slot) {
+  const its = dailyItems().filter(i => i.slot === slot); if (!its.length) return '';
+  const dn = its.filter(i => ddDone(i.id)).length, late = dn < its.length && nowHM() >= dailyTime()[slot];
+  return `<div class="lbl">${slot === 'am' ? '🌅' : '🌙'} ${SLOT_NAME[slot]} <span class="sub">${dn}/${its.length}${late ? ` · <b class="bad">${dailyTime()[slot]} 지남</b>` : ` · ${dailyTime()[slot]}까지`}</span></div>` +
+    its.map(i => { const on = ddDone(i.id); return `<div class="row ${on ? 'done' : ''}" data-act="daily" data-id="${h(i.id)}">${chkBtn(on, 'daily', i.id)}<div class="mid"><div class="nm">${h(i.name)}</div></div><div class="amt sub">${on ? hm(ck(ddId(iso(), i.id)).updatedAt) : ''}</div></div>`; }).join('');
+}
+function dailyWeek() {
+  const its = dailyItems(), today = dnum(iso());
+  return `<div class="dweek">${[6, 5, 4, 3, 2, 1, 0].map(k => { const ds = fromNum(today - k), n = its.filter(i => ddDone(i.id, ds)).length;
+    return `<div class="${n === its.length && its.length ? 'all' : n ? 'some' : ''}"><span>${k ? '일월화수목금토'[new Date((today - k) * DAY).getUTCDay()] : '오늘'}</span><b>${n}/${its.length}</b></div>`; }).join('')}</div>`;
+}
+function vDailyCard() {
+  const its = dailyItems(), dn = its.filter(i => ddDone(i.id)).length;
+  return `<div class="card" id="daily"><h2>오늘 챙길 것 <small>${dn}/${its.length}</small><button class="add" data-act="daily-set">항목·알림 ›</button></h2>
+    <div class="bar"><i class="g" style="width:${pct(dn, its.length)}%"></i></div>
+    ${its.length ? dailyRows('am') + dailyRows('pm') : '<div class="empty">항목이 없어요. 항목·알림에서 추가하세요</div>'}
+    ${dailyWeek()}${notifyOn() ? '' : '<div class="note">안 챙겼을 때 폰 알림을 받으려면 <b>항목·알림 ›</b>에서 알림을 켜세요.</div>'}</div>`;
+}
+function vDailySet() {
+  const t = dailyTime(), n = S.meta.notify, on = notifyOn(), perm = 'Notification' in window ? Notification.permission : 'none';
+  const st = on ? (n.bg === 'on' ? '켜짐 — 앱을 닫아 둬도 폰이 가끔 확인해요' : '켜짐 — 앱을 열 때 확인해요') : perm === 'denied' ? '차단됨 — 폰 설정에서 알림을 허용해 주세요' : '꺼짐';
+  return `<div class="card" id="dailyset"><h2>매일 체크리스트 · 알림</h2>
+    <div class="kv"><span>🌅 아침 알림 (이때까지 안 하면)</span><b>${h(t.am)}</b></div><div class="kv"><span>🌙 저녁 알림 (이때까지 안 하면)</span><b>${h(t.pm)}</b></div>
+    <button class="btn" data-act="daily-time">알림 시각 바꾸기</button>
+    <div class="sub" style="margin-top:10px">이 폰 알림: <b class="${on ? 'ok' : ''}">${st}</b></div>
+    ${on ? '<div class="btns"><button class="btn" data-act="notify-test">테스트 알림</button><button class="btn" data-act="notify-off">알림 끄기</button></div>' : '<button class="btn pri" data-act="notify-on">알림 켜기</button>'}
+    <div class="lbl">항목 <span class="sub">(누르면 수정)</span></div>
+    ${dailyItems().map(i => `<div class="row" data-act="daily-edit" data-id="${h(i.id)}"><span class="tag">${SLOT_NAME[i.slot]}</span><div class="mid"><div class="nm">${h(i.name)}</div></div><div class="amt sub">수정 ›</div></div>`).join('') || '<div class="empty">항목이 없어요</div>'}
+    <button class="btn" data-act="daily-add">＋ 항목 추가</button>
+    <button class="btn" data-act="daily-ics">폰 달력에 매일 알람 넣기</button>
+    <div class="note">앱 알림은 체크하지 않은 항목이 있을 때만 와요. 다만 앱을 닫아 두면 폰(크롬)이 확인하는 때를 정해서 늦게 오거나 안 올 수 있어요. 정확한 시각이 꼭 필요하면 '폰 달력에 매일 알람 넣기'를 같이 쓰세요(달력 알람은 체크해도 울려요).</div></div>`;
+}
+function editDaily(item) {
+  openForm({
+    title: item ? '항목 수정' : '항목 추가', value: item ? { ...item, slotName: SLOT_NAME[item.slot] } : { slotName: '저녁' },
+    fields: [{ key: 'name', label: '이름', ph: '예: 유산균' }, { key: 'slotName', label: '언제', type: 'select', options: ['아침', '저녁'] }],
+    check: o => o.name ? '' : '이름을 입력하세요',
+    onSave: o => { const it = { id: item?.id || 'd' + uid(), name: o.name, slot: o.slotName === '아침' ? 'am' : 'pm' };
+      const list = dailyItems().slice(), k = list.findIndex(x => x.id === it.id); if (k >= 0) list[k] = it; else list.push(it); return saveDaily(list); },
+    onDelete: item && (() => saveDaily(dailyItems().filter(x => x.id !== item.id))),
+  });
+}
+function editDailyTime() {
+  openForm({
+    title: '알림 시각', intro: '이 시각까지 다 체크하지 않으면 알림을 보내요.', value: dailyTime(),
+    fields: [{ key: 'am', label: '🌅 아침', type: 'time' }, { key: 'pm', label: '🌙 저녁', type: 'time' }],
+    check: o => /^\d\d:\d\d$/.test(o.am) && /^\d\d:\d\d$/.test(o.pm) ? '' : '시각을 입력하세요',
+    onSave: o => saveDaily(dailyItems(), { dailyTime: { am: o.am, pm: o.pm } }),
+  });
+}
+// 폰 달력(삼성·구글 캘린더)에 매일 반복 알람 일정 파일(.ics)
+function dailyIcs() {
+  const t = dailyTime(), d0 = iso().replace(/-/g, ''), stamp = new Date().toISOString().replace(/[-:]|\.\d+/g, '');
+  const until = prof().dueDate ? `;UNTIL=${fromNum(dnum(prof().dueDate) + 60).replace(/-/g, '')}T235959` : ';COUNT=300';
+  const esc = s => String(s).replace(/[\\;,]/g, c => '\\' + c).replace(/\n/g, '\\n');
+  const ev = slot => { const its = dailyItems().filter(i => i.slot === slot); if (!its.length) return '';
+    return ['BEGIN:VEVENT', `UID:yeoldal-daily-${slot}-${d0}@yeoldal`, `DTSTAMP:${stamp}`, `DTSTART:${d0}T${t[slot].replace(':', '')}00`, 'DURATION:PT10M',
+      `RRULE:FREQ=DAILY${until}`, `SUMMARY:${esc(`열달노트 · ${SLOT_NAME[slot]} 챙길 것`)}`, `DESCRIPTION:${esc(its.map(i => i.name).join(', '))}`,
+      'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${esc(`${SLOT_NAME[slot]} 챙길 것`)}`, 'TRIGGER:PT0M', 'END:VALARM', 'END:VEVENT'].join('\r\n') + '\r\n'; };
+  return 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//yeoldal-note//KO\r\nCALSCALE:GREGORIAN\r\n' + ev('am') + ev('pm') + 'END:VCALENDAR\r\n';
+}
+async function shareIcs() {
+  const f = new File([dailyIcs()], `열달노트_매일알람_${ymd()}.ics`, { type: 'text/calendar' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  showSheet(`<h3>달력 알람 파일을 받았어요</h3><p>1. 알림창이나 '내 파일 → 다운로드'에서 <b>${h(f.name)}</b>을 누르세요
+2. 캘린더 앱(삼성 캘린더·구글 캘린더)을 고르고 저장
+3. 매일 ${h(dailyTime().am)} / ${h(dailyTime().pm)}에 알람이 울려요</p>
+<p class="note">항목이나 시각을 바꾸면 달력의 예전 일정을 지우고 파일을 다시 받으세요. 달력 알람은 체크 여부와 상관없이 울려요.</p><button class="btn pri" data-a="x">닫기</button>`);
+  sheet.onclick = e => { if (e.target.closest('[data-a]')) closeSheet(); };
+}
+
 /* ---------- 화면 공통 ---------- */
 const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone;
 function installBanner() {
@@ -415,6 +549,7 @@ function vHome() {
     <div class="bar"><i style="width:${pct(g.days, 280)}%"></i></div>
     <div class="kv"><span>출산 예정일 ${fmtD(p.dueDate)} <span class="sub">${h(p.dueDate.slice(0, 4))}</span></span><b class="acc">${dtxt}</b></div>
     <div class="sub">지금 아기는 <b>${h(W.size)}</b> 정도 크기${W.len ? ` · 약 ${W.len}cm, ${W.wt >= 1000 ? kg1(W.wt / 1000) + 'kg' : W.wt + 'g'}` : ''} <span class="sub">(참고용 대략값)</span></div></div>`;
+  o += vDailyCard();
   o += `<div class="card"><h2>${w}주차 안내 <a class="add" href="#/week">자세히 ›</a></h2><div class="lbl">아기</div><div>${h(W.baby)}</div><div class="lbl">엄마</div><div>${h(W.mom)}</div>
     <div class="lbl">이번 주 할 일</div>${todoRows(w)}</div>`;
   const next = S.events.filter(e => !e.done && e.date >= today).sort(sortEv).slice(0, 3);
@@ -760,6 +895,7 @@ function vSet() {
   return `<div class="card"><h2>기본 정보 <button class="add" data-act="profile">수정</button></h2>
       <div class="kv"><span>출산 예정일</span><b>${h(p.dueDate || '미입력')}</b></div><div class="kv"><span>태명</span><b>${h(p.babyName || '-')}</b></div>
       <div class="kv"><span>키 / 임신 전 몸무게</span><b>${p.height ? h(p.height) + 'cm' : '-'} / ${p.preWeight ? h(p.preWeight) + 'kg' : '-'}</b></div></div>
+    ${vDailySet()}
     <div class="card"><h2>부부 공유</h2><div class="sub" data-sync><i class="dot ${syncState}"></i>${SYNC_TXT[syncState]}</div>` + (sc
       ? `<button class="btn pri" data-act="sync-key">공유 키 보기 (배우자 폰에 전달)</button><button class="btn danger" data-act="sync-off">이 폰의 공유 끊기</button>`
       : `<p class="note">두 폰에서 같은 기록을 실시간으로 보려면 공유 저장소(Firebase, 무료)가 한 번 필요해요.</p>
@@ -829,6 +965,15 @@ view.addEventListener('click', async e => {
   const el = e.target.closest('[data-act]'); if (!el) return;
   const a = el.dataset.act, id = el.dataset.id;
   if (a === 'check') { await toggleCheck(id); return render(); }
+  if (a === 'daily') { await toggleDaily(id); return render(); }
+  if (a === 'daily-set') { location.hash = '#/set'; setTimeout(() => $('#dailyset')?.scrollIntoView({ block: 'start' }), 50); return; }
+  if (a === 'daily-edit') return editDaily(dailyItems().find(x => x.id === id));
+  if (a === 'daily-add') return editDaily(null);
+  if (a === 'daily-time') return editDailyTime();
+  if (a === 'daily-ics') return shareIcs();
+  if (a === 'notify-on') return enableNotify();
+  if (a === 'notify-test') return testNotify();
+  if (a === 'notify-off') { await periodicOff(); await setMeta('notify', { on: false }); toast('이 폰의 알림을 껐어요'); return render(); }
   if (a === 'ev-toggle') { const r = S.events.find(x => x.id === id); await put('events', { ...r, done: !r.done }); return render(); }
   if (a === 'edit') { const r = S[el.dataset.store].find(x => x.id === id); return r && EDIT[el.dataset.store](r); }
   if (a === 'profile') return editProfile();
@@ -877,7 +1022,8 @@ view.addEventListener('click', async e => {
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (route() === 'home') render(); });
 window.addEventListener('appinstalled', () => { installEvt = null; navigator.storage?.persist?.(); render(); });
 window.addEventListener('online', () => { if (syncCfg()) syncStart(); });
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { if (syncCfg() && syncState !== 'on') syncStart(); render(); } });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { if (syncCfg() && syncState !== 'on') syncStart(); render(); } notifyCheck(); });
+setInterval(() => notifyCheck(), 60000);
 
 /* ---------- 시작 ---------- */
 (async () => {
@@ -886,5 +1032,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) { if
   render();
   if (syncCfg()) syncStart();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-  window.X = { S, R, UI, guide, range, statusOf, comp, pregKg, wlogs, stdKey, autoKey, summaryText, makeSummaryImage, importBaekdo, readBaekdoLocal, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, APP_VERSION };
+  if (S.meta.notify?.on && 'Notification' in window && Notification.permission === 'granted') periodicOn().then(bg => { if (bg !== S.meta.notify.bg) setMeta('notify', { ...S.meta.notify, bg }); });
+  setTimeout(notifyCheck, 1500);
+  window.X = { S, R, UI, guide, range, statusOf, comp, pregKg, wlogs, stdKey, autoKey, summaryText, makeSummaryImage, importBaekdo, readBaekdoLocal, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, dailyItems, dailyTime, dailyMissing, toggleDaily, ddDone, dailyIcs, notifyCheck, APP_VERSION };
 })();
