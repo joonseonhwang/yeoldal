@@ -121,4 +121,6 @@ const DAILY_DEFAULT = [
 ];
 // 이 시각까지 다 체크하지 않으면 알림 [Claude] 기본값 — 설정에서 변경
 const DAILY_TIME = { am: '10:00', pm: '21:30' };
+// 아침·저녁 알림 켜짐 여부 기본값 [사용자 2026-11-25: 보통 아침 알림은 필요 없고 저녁만]
+const DAILY_ON = { am: false, pm: true };
 const SLOT_NAME = { am: '아침', pm: '저녁' };

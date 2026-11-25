@@ -3,7 +3,7 @@
 // 기록은 이 기기의 IndexedDB에 저장한다. '부부 공유'를 켠 경우에만 사용자가 만든 Firebase 실시간 데이터베이스로 기록을 보낸다.
 // 주별 안내·검사 시기 내용과 그 출처는 data.js 참고.
 'use strict';
-const APP_VERSION = '1.2.3';
+const APP_VERSION = '1.2.4';
 const DB_NAME = 'yeoldal-note';
 const STORES = ['profile', 'weights', 'events', 'diary', 'kicks', 'contractions', 'checks'];
 const DAY = 86400000;
@@ -380,6 +380,7 @@ const toggleCheck = id => put('checks', { ...(ck(id) || { id }), done: !ck(id)?.
    알림 켜기·보낸 기록: meta 'notify' / 'notified' (이 폰에만). 서비스워커(sw.js)도 같은 규칙으로 백그라운드에서 확인한다. */
 const dailyItems = () => Array.isArray(prof().daily) ? prof().daily : DAILY_DEFAULT;
 const dailyTime = () => ({ ...DAILY_TIME, ...(prof().dailyTime || {}) });
+const dailyOn = () => ({ ...DAILY_ON, ...(prof().dailyOn || {}) });   // 아침·저녁 알림 따로 켜고 끄기 (profile.dailyOn, 부부 공유)
 const ddId = (date, item) => `dd-${date}-${item}`;
 const ddDone = (item, date = iso()) => !!ck(ddId(date, item))?.done;
 const toggleDaily = (item, date = iso()) => put('checks', { id: ddId(date, item), kind: 'daily', date, item, done: !ddDone(item, date) });
@@ -394,7 +395,7 @@ const nowHM = (d = new Date()) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 function dailyMissing(now = new Date()) {
   const date = iso(now), t = dailyTime(), out = [];
   for (const slot of ['am', 'pm']) {
-    if (nowHM(now) < t[slot]) continue;
+    if (!dailyOn()[slot] || nowHM(now) < t[slot]) continue;
     const miss = dailyItems().filter(i => i.slot === slot && !ddDone(i.id, date));
     if (miss.length) out.push({ slot, date, miss });
   }
@@ -491,8 +492,8 @@ async function testNotify() {
 }
 function dailyRows(slot) {
   const its = dailyItems().filter(i => i.slot === slot); if (!its.length) return '';
-  const dn = its.filter(i => ddDone(i.id)).length, late = dn < its.length && nowHM() >= dailyTime()[slot];
-  return `<div class="lbl dslot"><span>${slot === 'am' ? '🌅' : '🌙'} ${SLOT_NAME[slot]} <span class="sub">${dn}/${its.length}${late ? ` · <b class="bad">${dailyTime()[slot]} 지남</b>` : ` · ${dailyTime()[slot]}까지`}</span></span>` +
+  const dn = its.filter(i => ddDone(i.id)).length, late = dailyOn()[slot] && dn < its.length && nowHM() >= dailyTime()[slot];
+  return `<div class="lbl dslot"><span>${slot === 'am' ? '🌅' : '🌙'} ${SLOT_NAME[slot]} <span class="sub">${dn}/${its.length}${late ? ` · <b class="bad">${dailyTime()[slot]} 지남</b>` : (dailyOn()[slot] ? ` · ${dailyTime()[slot]}까지` : '')}</span></span>` +
     `<button class="dall ${dn === its.length ? 'off' : ''}" data-act="daily-all" data-id="${slot}">${dn === its.length ? '모두 해제' : `${SLOT_NAME[slot]} 모두 체크`}</button></div>` +
     its.map(i => { const on = ddDone(i.id); return `<div class="row ${on ? 'done' : ''}" data-act="daily" data-id="${h(i.id)}">${chkBtn(on, 'daily', i.id)}<div class="mid"><div class="nm">${h(i.name)}</div></div><div class="amt sub">${on ? hm(ck(ddId(iso(), i.id)).updatedAt) : ''}</div></div>`; }).join('');
 }
@@ -512,7 +513,7 @@ function vDailySet() {
   const t = dailyTime(), n = S.meta.notify, on = notifyOn(), perm = 'Notification' in window ? Notification.permission : 'none';
   const st = on ? (n.push === 'on' ? '켜짐 — 앱을 꺼 둬도 정한 시각에 와요' : n.push === 'nosync' ? '켜짐 — 앱을 열 때만 확인 (정확한 시각 알림은 부부 공유가 필요해요)' : '켜짐 — 정확한 시각 알림 등록 안 됨 (알림 끄기 → 켜기로 다시 시도)') : perm === 'denied' ? '차단됨 — 폰 설정에서 알림을 허용해 주세요' : '꺼짐';
   return `<div class="card" id="dailyset"><h2>매일 체크리스트 · 알림</h2>
-    <div class="kv"><span>🌅 아침 알림 (이때까지 안 하면)</span><b>${h(t.am)}</b></div><div class="kv"><span>🌙 저녁 알림 (이때까지 안 하면)</span><b>${h(t.pm)}</b></div>
+    ${['am', 'pm'].map(s => `<div class="kv dslot"><span>${s === 'am' ? '🌅' : '🌙'} ${SLOT_NAME[s]} 알림 <b class="${dailyOn()[s] ? '' : 'sub'}">${h(t[s])}</b></span><button class="dall ${dailyOn()[s] ? '' : 'off'}" data-act="daily-on" data-id="${s}">${dailyOn()[s] ? '켜짐' : '꺼짐'}</button></div>`).join('')}
     <button class="btn" data-act="daily-time">알림 시각 바꾸기</button>
     <div class="sub" style="margin-top:10px">이 폰 알림: <b class="${on ? 'ok' : ''}">${st}</b></div>
     ${on && n.push === 'on' ? `<div class="sub" id="pushsrv">${srvLine()}</div>` : ''}
@@ -521,7 +522,7 @@ function vDailySet() {
     ${dailyItems().map(i => `<div class="row" data-act="daily-edit" data-id="${h(i.id)}"><span class="tag">${SLOT_NAME[i.slot]}</span><div class="mid"><div class="nm">${h(i.name)}</div></div><div class="amt sub">수정 ›</div></div>`).join('') || '<div class="empty">항목이 없어요</div>'}
     <button class="btn" data-act="daily-add">＋ 항목 추가</button>
     <button class="btn" data-act="daily-ics">폰 달력에 매일 알람 넣기</button>
-    <div class="note">알림은 정한 시각까지 체크하지 않은 항목이 있을 때만 와요. 앱을 꺼 둬도 집 PC가 정한 시각에 보내 줘요(그 PC가 켜져 있고 인터넷이 될 때). PC가 꺼져 있을 때를 대비하려면 '폰 달력에 매일 알람 넣기'를 같이 쓰세요(달력 알람은 체크해도 울려요).</div></div>`;
+    <div class="note">알림은 정한 시각까지 체크하지 않은 항목이 있을 때만 와요. 아침·저녁 알림은 오른쪽 버튼으로 따로 켜고 끌 수 있어요(부부가 같이 바뀜). 앱을 꺼 둬도 집 PC가 정한 시각에 보내 줘요(그 PC가 켜져 있고 인터넷이 될 때). PC가 꺼져 있을 때를 대비하려면 '폰 달력에 매일 알람 넣기'를 같이 쓰세요(달력 알람은 체크해도 울려요).</div></div>`;
 }
 function editDaily(item) {
   openForm({
@@ -546,7 +547,7 @@ function dailyIcs() {
   const t = dailyTime(), d0 = iso().replace(/-/g, ''), stamp = new Date().toISOString().replace(/[-:]|\.\d+/g, '');
   const until = prof().dueDate ? `;UNTIL=${fromNum(dnum(prof().dueDate) + 60).replace(/-/g, '')}T235959` : ';COUNT=300';
   const esc = s => String(s).replace(/[\\;,]/g, c => '\\' + c).replace(/\n/g, '\\n');
-  const ev = slot => { const its = dailyItems().filter(i => i.slot === slot); if (!its.length) return '';
+  const ev = slot => { const its = dailyItems().filter(i => i.slot === slot); if (!its.length || !dailyOn()[slot]) return '';
     return ['BEGIN:VEVENT', `UID:yeoldal-daily-${slot}-${d0}@yeoldal`, `DTSTAMP:${stamp}`, `DTSTART:${d0}T${t[slot].replace(':', '')}00`, 'DURATION:PT10M',
       `RRULE:FREQ=DAILY${until}`, `SUMMARY:${esc(`열달노트 · ${SLOT_NAME[slot]} 챙길 것`)}`, `DESCRIPTION:${esc(its.map(i => i.name).join(', '))}`,
       'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${esc(`${SLOT_NAME[slot]} 챙길 것`)}`, 'TRIGGER:PT0M', 'END:VALARM', 'END:VEVENT'].join('\r\n') + '\r\n'; };
@@ -558,7 +559,7 @@ async function shareIcs() {
   setTimeout(() => URL.revokeObjectURL(a.href), 3000);
   showSheet(`<h3>달력 알람 파일을 받았어요</h3><p>1. 알림창이나 '내 파일 → 다운로드'에서 <b>${h(f.name)}</b>을 누르세요
 2. 캘린더 앱(삼성 캘린더·구글 캘린더)을 고르고 저장
-3. 매일 ${h(dailyTime().am)} / ${h(dailyTime().pm)}에 알람이 울려요</p>
+3. 매일 ${['am', 'pm'].filter(s => dailyOn()[s]).map(s => h(dailyTime()[s])).join(' / ') || '(켜진 알림 없음)'}에 알람이 울려요</p>
 <p class="note">항목이나 시각을 바꾸면 달력의 예전 일정을 지우고 파일을 다시 받으세요. 달력 알람은 체크 여부와 상관없이 울려요.</p><button class="btn pri" data-a="x">닫기</button>`);
   sheet.onclick = e => { if (e.target.closest('[data-a]')) closeSheet(); };
 }
@@ -1029,6 +1030,7 @@ view.addEventListener('click', async e => {
   if (a === 'daily-edit') return editDaily(dailyItems().find(x => x.id === id));
   if (a === 'daily-add') return editDaily(null);
   if (a === 'daily-time') return editDailyTime();
+  if (a === 'daily-on') { const on = { ...dailyOn(), [id]: !dailyOn()[id] }; await saveDaily(dailyItems(), { dailyOn: on }); toast(`${SLOT_NAME[id]} 알림을 ${on[id] ? '켰어요' : '껐어요'}`); return render(); }
   if (a === 'daily-ics') return shareIcs();
   if (a === 'notify-on') return enableNotify();
   if (a === 'notify-test') return testNotify();
@@ -1102,5 +1104,5 @@ setInterval(() => notifyCheck(), 60000);
   if (S.meta.notify?.on && 'Notification' in window && Notification.permission === 'granted')
     Promise.all([within(periodicOn(), 10000, S.meta.notify.bg), within(pushOn(), 15000, S.meta.notify.push)]).then(([bg, push]) => { if (bg !== S.meta.notify.bg || push !== S.meta.notify.push) setMeta('notify', { ...S.meta.notify, bg, push }).then(() => route() === 'set' && render()); });
   setTimeout(notifyCheck, 1500);
-  window.X = { within, S, R, UI, guide, range, statusOf, comp, pregKg, wlogs, stdKey, autoKey, summaryText, makeSummaryImage, importBaekdo, readBaekdoLocal, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, dailyItems, dailyTime, dailyMissing, toggleDaily, slotAll, ddDone, dailyIcs, notifyCheck, pushOn, pushOff, VAPID_PUBLIC, APP_VERSION };
+  window.X = { dailyOn, within, S, R, UI, guide, range, statusOf, comp, pregKg, wlogs, stdKey, autoKey, summaryText, makeSummaryImage, importBaekdo, readBaekdoLocal, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, dailyItems, dailyTime, dailyMissing, toggleDaily, slotAll, ddDone, dailyIcs, notifyCheck, pushOn, pushOff, VAPID_PUBLIC, APP_VERSION };
 })();

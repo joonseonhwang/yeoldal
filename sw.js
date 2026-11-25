@@ -1,6 +1,6 @@
 // 열달노트 서비스워커 — 출처: [Claude] 작성
 // 배포할 때마다 CACHE 이름과 app.js의 APP_VERSION을 함께 올린다.
-const CACHE = 'yeoldal-note-v1.2.3';
+const CACHE = 'yeoldal-note-v1.2.4';
 const FILES = ['./', 'index.html', 'styles.css', 'data.js', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png'];
 
@@ -49,7 +49,7 @@ self.addEventListener('fetch', e => {
 const DEF_ITEMS = [['dvitd', '비타민D', 'am'], ['dfolic', '엽산', 'am'], ['domega3', '오메가3', 'am'], ['dmag', '마그네슘', 'am'],
   ['dstretch', '튼살크림', 'pm'], ['dwhite', '미백크림', 'pm'], ['dneck', '목크림', 'pm'], ['diron', '철분제', 'pm'], ['dfoot', '발 크림', 'pm']]
   .map(([id, name, slot]) => ({ id, name, slot }));   // data.js의 DAILY_DEFAULT와 같게 유지
-const DEF_TIME = { am: '10:00', pm: '21:30' }, SLOT = { am: '아침', pm: '저녁' };
+const DEF_TIME = { am: '10:00', pm: '21:30' }, DEF_ON = { am: false, pm: true }, SLOT = { am: '아침', pm: '저녁' };
 const p2 = n => String(n).padStart(2, '0');
 function openDb() {
   return new Promise(res => {
@@ -67,13 +67,13 @@ async function checkDaily() {
     const [prof, notify, sentRec] = await Promise.all([req(t.objectStore('profile').get('main')), req(t.objectStore('meta').get('notify')), req(t.objectStore('meta').get('notified'))]);
     if (!notify?.value?.on || !prof || (!prof.dueDate && !Array.isArray(prof.daily))) return;
     const now = new Date(), date = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())}`, hm = `${p2(now.getHours())}:${p2(now.getMinutes())}`;
-    const items = Array.isArray(prof.daily) ? prof.daily : DEF_ITEMS, time = { ...DEF_TIME, ...(prof.dailyTime || {}) };
+    const items = Array.isArray(prof.daily) ? prof.daily : DEF_ITEMS, time = { ...DEF_TIME, ...(prof.dailyTime || {}) }, on = { ...DEF_ON, ...(prof.dailyOn || {}) };
     const recs = await req(db.transaction('checks').objectStore('checks').getAll(IDBKeyRange.bound(`dd-${date}-`, `dd-${date}-￿`))) || [];
     const done = new Set(recs.filter(r => r.done && !r.deleted).map(r => r.item));
     const sent = sentRec?.value || {};
     let changed = false;
     for (const slot of ['am', 'pm']) {
-      if (hm < time[slot] || sent[`${date}-${slot}`]) continue;
+      if (!on[slot] || hm < time[slot] || sent[`${date}-${slot}`]) continue;
       const miss = items.filter(i => i.slot === slot && !done.has(i.id)); if (!miss.length) continue;
       await self.registration.showNotification(`열달노트 · ${SLOT[slot]} 챙길 것`, { body: miss.map(i => i.name).join(', ') + ' — 아직 체크 안 했어요', tag: 'daily-' + slot, icon: 'icons/icon-192.png', data: { url: './#/home' } });
       sent[`${date}-${slot}`] = Date.now(); changed = true;
