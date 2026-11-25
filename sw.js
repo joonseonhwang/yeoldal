@@ -1,6 +1,6 @@
 // 열달노트 서비스워커 — 출처: [Claude] 작성
 // 배포할 때마다 CACHE 이름과 app.js의 APP_VERSION을 함께 올린다.
-const CACHE = 'yeoldal-note-v1.2.4';
+const CACHE = 'yeoldal-note-v1.2.5';
 const FILES = ['./', 'index.html', 'styles.css', 'data.js', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png'];
 

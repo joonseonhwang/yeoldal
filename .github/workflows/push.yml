@@ -1,0 +1,29 @@
+# 열달노트 알림 예비 발송 — 집 PC가 꺼져 있어도 아침·저녁 알림이 가게 한다. 출처: [Claude] 2026-11-25 작성.
+# 15분마다 push/run.mjs 실행. 비밀 값(DB_URL, ROOM_CODE, VAPID_JWK)은 저장소 Settings > Secrets에만 있다.
+# 참고: 저장소에 60일 동안 변경이 없으면 GitHub가 예약 실행을 멈춘다 → Actions 탭에서 다시 켜기.
+name: yeoldal-push
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: yeoldal-push
+  cancel-in-progress: false
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: push
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node push/run.mjs
+        env:
+          DB_URL: ${{ secrets.DB_URL }}
+          ROOM_CODE: ${{ secrets.ROOM_CODE }}
+          VAPID_JWK: ${{ secrets.VAPID_JWK }}

@@ -3,7 +3,7 @@
 // 기록은 이 기기의 IndexedDB에 저장한다. '부부 공유'를 켠 경우에만 사용자가 만든 Firebase 실시간 데이터베이스로 기록을 보낸다.
 // 주별 안내·검사 시기 내용과 그 출처는 data.js 참고.
 'use strict';
-const APP_VERSION = '1.2.4';
+const APP_VERSION = '1.2.5';
 const DB_NAME = 'yeoldal-note';
 const STORES = ['profile', 'weights', 'events', 'diary', 'kicks', 'contractions', 'checks'];
 const DAY = 86400000;
@@ -420,8 +420,8 @@ async function notifyCheck() {
   if (changed) { for (const k of Object.keys(sent)) if (Date.now() - sent[k] > 7 * DAY) delete sent[k]; await setMeta('notified', sent); }
 }
 /* 정확한 시각 알림: 이 폰의 '알림 받을 주소'(웹 푸시 구독)를 공유 저장소 push/<기기id>에 올리면,
-   24시간 켜 둔 PC의 발송 프로그램(yeoldal_push.py)이 정한 시각에 체크 기록을 보고 안 한 게 있으면 알림을 보낸다.
-   아래는 공개 열쇠(공개돼도 됨). 짝이 되는 비밀 열쇠는 발송 PC에만 있다. */
+   집 PC의 발송 프로그램(yeoldal_push.py)과 GitHub 예비 발송기(push/run.mjs, PC가 꺼졌을 때 대신)가 정한 시각에 체크 기록을 보고 안 한 게 있으면 알림을 보낸다.
+   아래는 공개 열쇠(공개돼도 됨). 짝이 되는 비밀 열쇠는 발송 PC와 저장소 비밀 설정(Secrets)에만 있다. */
 const VAPID_PUBLIC = 'BGLneECTpSbOg2liwse7zi2kBkCQjPjWgscqx6H0xGHB-mfGABV2_SzrjTs_HxqGPAXDhK_Dk6XNnTJxnJe8Pys';
 const b64u = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
 async function devId() { if (!S.meta.devId) await setMeta('devId', 'p' + uid()); return S.meta.devId; }
@@ -440,18 +440,21 @@ async function pushOff() {
   try { const reg = await navigator.serviceWorker.ready; const sub = await reg.pushManager?.getSubscription(); if (sub) await sub.unsubscribe(); } catch (e) { /* 없음 */ }
   if (syncCfg() && S.meta.devId) try { await fetch(`${syncBase()}/push/${S.meta.devId}.json`, { method: 'DELETE' }); } catch (e) { /* 오프라인 */ }
 }
-// 발송 PC가 5분마다 남기는 '살아 있음' 시각
-let srvAt = null;
+// 발송기가 남기는 '살아 있음' 시각: 집 PC(at, 5분마다), 예비 발송기(cloudAt, GitHub에서 15분마다)
+let srvAt = null, cloudAt = null;
 async function pushSrvCheck() {
   if (!syncCfg()) return;
-  try { const r = await fetch(`${syncBase()}/pushsrv.json`); const o = r.ok ? await r.json() : null; srvAt = o?.at || 0; } catch (e) { srvAt = null; }
+  try { const r = await fetch(`${syncBase()}/pushsrv.json`); const o = r.ok ? await r.json() : null; srvAt = o?.at || 0; cloudAt = o?.cloudAt || 0; } catch (e) { srvAt = cloudAt = null; }
   const el = $('#pushsrv'); if (el) el.innerHTML = srvLine();
 }
 function srvLine() {
-  if (srvAt === null) return '알림 보내는 PC: 확인 중…';
-  if (!srvAt) return '<b class="bad">알림 보내는 PC: 아직 연결된 적 없음</b>';
-  const m = Math.round((Date.now() - srvAt) / 60000);
-  return m <= 12 ? `<b class="ok">알림 보내는 PC: 켜져 있음</b> <span class="sub">(${m}분 전 확인)</span>` : `<b class="bad">알림 보내는 PC: ${m >= 120 ? Math.round(m / 60) + '시간' : m + '분'} 동안 응답 없음 — 꺼져 있으면 정확한 시각 알림이 안 와요</b>`;
+  if (srvAt === null) return '알림 보내는 곳: 확인 중…';
+  const ago = t => { const m = Math.round((Date.now() - t) / 60000); return m >= 120 ? Math.round(m / 60) + '시간' : m + '분'; };
+  const pcOk = srvAt && Date.now() - srvAt <= 12 * 60000, clOk = cloudAt && Date.now() - cloudAt <= 90 * 60000;
+  const pc = pcOk ? `<b class="ok">집 PC: 켜져 있음</b> <span class="sub">(${ago(srvAt)} 전 확인)</span>` : `<span class="sub">집 PC: ${srvAt ? ago(srvAt) + ' 동안 응답 없음' : '연결된 적 없음'}</span>`;
+  const cl = clOk ? `<b class="ok">예비 발송(인터넷): 작동 중</b> <span class="sub">(${ago(cloudAt)} 전 확인)</span>` : `<span class="sub">예비 발송(인터넷): ${cloudAt ? ago(cloudAt) + ' 동안 응답 없음' : '아직 작동 기록 없음'}</span>`;
+  const warn = pcOk || clOk ? '' : '<br><b class="bad">지금은 정확한 시각 알림을 보낼 곳이 없어요</b>';
+  return `${pc}<br>${cl}${warn}`;
 }
 // 폰에서 응답 없이 멈추는 경우 대비: ms 안에 안 끝나면 fb를 돌려준다
 const within = (p, ms, fb) => Promise.race([Promise.resolve(p).catch(() => fb), new Promise(r => setTimeout(() => r(fb), ms))]);
@@ -485,7 +488,7 @@ async function testNotify() {
   if (!notifyOn()) return toast('먼저 알림을 켜 주세요');
   if (S.meta.notify.push === 'on' && syncCfg()) {
     try { const r = await fetch(`${syncBase()}/push/${await devId()}.json`, { method: 'PATCH', body: JSON.stringify({ testAt: Date.now() }) }); if (!r.ok) throw 0;
-      return toast('PC에 테스트 알림을 요청했어요. 앱을 닫고 기다리면 30초 안에 와요'); } catch (e) { toast('요청 실패 — 이 폰에서 바로 띄워요'); }
+      return toast('테스트 알림을 요청했어요. 앱을 닫고 기다리면 집 PC가 켜져 있으면 30초, 꺼져 있으면 15분쯤 안에 와요'); } catch (e) { toast('요청 실패 — 이 폰에서 바로 띄워요'); }
   }
   const reg = await navigator.serviceWorker.ready, miss = dailyItems().filter(i => !ddDone(i.id));
   await reg.showNotification('열달노트 · 테스트 알림', { body: miss.length ? `오늘 남은 것: ${miss.map(i => i.name).join(', ')}` : '오늘 다 챙겼어요 👍', tag: 'daily-test', icon: 'icons/icon-192.png', data: { url: './#/home' } });
@@ -522,7 +525,7 @@ function vDailySet() {
     ${dailyItems().map(i => `<div class="row" data-act="daily-edit" data-id="${h(i.id)}"><span class="tag">${SLOT_NAME[i.slot]}</span><div class="mid"><div class="nm">${h(i.name)}</div></div><div class="amt sub">수정 ›</div></div>`).join('') || '<div class="empty">항목이 없어요</div>'}
     <button class="btn" data-act="daily-add">＋ 항목 추가</button>
     <button class="btn" data-act="daily-ics">폰 달력에 매일 알람 넣기</button>
-    <div class="note">알림은 정한 시각까지 체크하지 않은 항목이 있을 때만 와요. 아침·저녁 알림은 오른쪽 버튼으로 따로 켜고 끌 수 있어요(부부가 같이 바뀜). 앱을 꺼 둬도 집 PC가 정한 시각에 보내 줘요(그 PC가 켜져 있고 인터넷이 될 때). PC가 꺼져 있을 때를 대비하려면 '폰 달력에 매일 알람 넣기'를 같이 쓰세요(달력 알람은 체크해도 울려요).</div></div>`;
+    <div class="note">알림은 정한 시각까지 체크하지 않은 항목이 있을 때만 와요. 아침·저녁 알림은 오른쪽 버튼으로 따로 켜고 끌 수 있어요(부부가 같이 바뀜). 앱을 꺼 둬도 집 PC가 정한 시각에 보내 줘요. PC가 꺼져 있으면 인터넷의 예비 발송기가 1~2분 늦게 대신 보내요(가끔 더 늦을 수 있어요). 꼭 정시에 울려야 하면 '폰 달력에 매일 알람 넣기'를 같이 쓰세요(달력 알람은 체크해도 울려요).</div></div>`;
 }
 function editDaily(item) {
   openForm({
