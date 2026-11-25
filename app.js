@@ -3,7 +3,7 @@
 // 기록은 이 기기의 IndexedDB에 저장한다. '부부 공유'를 켠 경우에만 사용자가 만든 Firebase 실시간 데이터베이스로 기록을 보낸다.
 // 주별 안내·검사 시기 내용과 그 출처는 data.js 참고.
 'use strict';
-const APP_VERSION = '1.2.2';
+const APP_VERSION = '1.2.3';
 const DB_NAME = 'yeoldal-note';
 const STORES = ['profile', 'weights', 'events', 'diary', 'kicks', 'contractions', 'checks'];
 const DAY = 86400000;
@@ -427,7 +427,7 @@ async function devId() { if (!S.meta.devId) await setMeta('devId', 'p' + uid());
 async function pushOn() {
   if (!syncCfg()) return 'nosync';
   try {
-    const reg = await navigator.serviceWorker.ready; if (!reg.pushManager) return 'unsupported';
+    const reg = await swReady(); if (!reg?.pushManager) return 'unsupported';
     let sub = await reg.pushManager.getSubscription();
     if (sub && btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey || []))).replace(/=+$/, '') !== btoa(String.fromCharCode(...b64u(VAPID_PUBLIC))).replace(/=+$/, '')) { await sub.unsubscribe(); sub = null; }
     if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(VAPID_PUBLIC) });
@@ -452,9 +452,12 @@ function srvLine() {
   const m = Math.round((Date.now() - srvAt) / 60000);
   return m <= 12 ? `<b class="ok">알림 보내는 PC: 켜져 있음</b> <span class="sub">(${m}분 전 확인)</span>` : `<b class="bad">알림 보내는 PC: ${m >= 120 ? Math.round(m / 60) + '시간' : m + '분'} 동안 응답 없음 — 꺼져 있으면 정확한 시각 알림이 안 와요</b>`;
 }
+// 폰에서 응답 없이 멈추는 경우 대비: ms 안에 안 끝나면 fb를 돌려준다
+const within = (p, ms, fb) => Promise.race([Promise.resolve(p).catch(() => fb), new Promise(r => setTimeout(() => r(fb), ms))]);
+const swReady = (ms = 8000) => within(navigator.serviceWorker.ready, ms, null);
 async function periodicOn() {
   try {
-    const reg = await navigator.serviceWorker.ready;
+    const reg = await swReady(); if (!reg) return 'unsupported';
     if (!reg.periodicSync) return 'unsupported';
     const st = await navigator.permissions.query({ name: 'periodic-background-sync' });
     if (st.state !== 'granted') return 'denied';
@@ -463,13 +466,19 @@ async function periodicOn() {
   } catch (e) { return 'unsupported'; }
 }
 async function periodicOff() { try { const reg = await navigator.serviceWorker.ready; await reg.periodicSync?.unregister('daily-check'); } catch (e) { /* 없음 */ } }
+let notifyBusy = false;
 async function enableNotify() {
   if (!('Notification' in window) || !('serviceWorker' in navigator)) return toast('이 브라우저는 알림을 지원하지 않아요');
-  const p = await Notification.requestPermission();
-  if (p !== 'granted') return toast('알림이 허용되지 않았어요. 폰 설정 → 애플리케이션 → 열달노트(또는 Chrome) → 알림에서 켜 주세요');
-  const bg = await periodicOn(), push = await pushOn();
-  await setMeta('notify', { on: true, bg, push });
+  if (notifyBusy) return toast('알림 켜는 중이에요…');
+  notifyBusy = true; toast('알림 켜는 중…');
+  try {
+    const p = Notification.permission === 'granted' ? 'granted' : await within(Notification.requestPermission(), 60000, Notification.permission);
+    if (p !== 'granted') return toast(p === 'denied' ? '알림이 막혀 있어요. 폰 설정 → 애플리케이션 → 열달노트(또는 Chrome) → 알림에서 허용해 주세요' : '알림 허용 창에서 "허용"을 눌러 주세요');
+    const [bg, push] = await Promise.all([within(periodicOn(), 10000, 'unsupported'), within(pushOn(), 15000, 'fail')]);
+    await setMeta('notify', { on: true, bg, push });
   toast(push === 'on' ? '알림을 켰어요. 앱을 꺼 둬도 정한 시각에 와요' : push === 'nosync' ? '알림을 켰어요. 정확한 시각 알림은 부부 공유를 켜야 돼요' : '알림을 켰어요 (정확한 시각 알림 등록은 실패 — 인터넷 확인 후 다시 켜 주세요)'); render(); pushSrvCheck();
+  } catch (e) { toast('알림 켜기 실패 — 앱을 닫았다 다시 열고 한 번 더 눌러 주세요'); }
+  finally { notifyBusy = false; }
 }
 async function testNotify() {
   if (!notifyOn()) return toast('먼저 알림을 켜 주세요');
@@ -1081,9 +1090,17 @@ setInterval(() => notifyCheck(), 60000);
   if (!S.meta.firstUse) await setMeta('firstUse', Date.now());
   render();
   if (syncCfg()) syncStart();
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // 새 버전이 배포되면 바로 받아서 한 번만 다시 연다(옛 화면이 남는 문제 방지)
+    const hadCtl = !!navigator.serviceWorker.controller; let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadCtl && !reloaded) { reloaded = true; location.reload(); } });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+      reg.update().catch(() => {});
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+    }).catch(() => {});
+  }
   if (S.meta.notify?.on && 'Notification' in window && Notification.permission === 'granted')
-    Promise.all([periodicOn(), pushOn()]).then(([bg, push]) => { if (bg !== S.meta.notify.bg || push !== S.meta.notify.push) setMeta('notify', { ...S.meta.notify, bg, push }).then(() => route() === 'set' && render()); });
+    Promise.all([within(periodicOn(), 10000, S.meta.notify.bg), within(pushOn(), 15000, S.meta.notify.push)]).then(([bg, push]) => { if (bg !== S.meta.notify.bg || push !== S.meta.notify.push) setMeta('notify', { ...S.meta.notify, bg, push }).then(() => route() === 'set' && render()); });
   setTimeout(notifyCheck, 1500);
-  window.X = { S, R, UI, guide, range, statusOf, comp, pregKg, wlogs, stdKey, autoKey, summaryText, makeSummaryImage, importBaekdo, readBaekdoLocal, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, dailyItems, dailyTime, dailyMissing, toggleDaily, slotAll, ddDone, dailyIcs, notifyCheck, pushOn, pushOff, VAPID_PUBLIC, APP_VERSION };
+  window.X = { within, S, R, UI, guide, range, statusOf, comp, pregKg, wlogs, stdKey, autoKey, summaryText, makeSummaryImage, importBaekdo, readBaekdoLocal, importData, clearAll, backupObj, loadAll, render, match, put, del, setMeta, ga, syncConnect, syncStart, syncKey, parseKey, get syncState() { return syncState; }, dailyItems, dailyTime, dailyMissing, toggleDaily, slotAll, ddDone, dailyIcs, notifyCheck, pushOn, pushOff, VAPID_PUBLIC, APP_VERSION };
 })();

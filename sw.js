@@ -1,11 +1,12 @@
 // 열달노트 서비스워커 — 출처: [Claude] 작성
 // 배포할 때마다 CACHE 이름과 app.js의 APP_VERSION을 함께 올린다.
-const CACHE = 'yeoldal-note-v1.2.2';
+const CACHE = 'yeoldal-note-v1.2.3';
 const FILES = ['./', 'index.html', 'styles.css', 'data.js', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
+  // 브라우저 임시 저장(10분)을 건너뛰고 서버에서 새로 받는다
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES.map(f => new Request(f, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()
@@ -25,13 +26,21 @@ self.addEventListener('fetch', e => {
     }).catch(() => caches.match('index.html')));
     return;
   }
-  // 정적 파일: 캐시 우선 + 백그라운드 갱신
+  // 앱 코드(js·css·html): 네트워크 우선(3초 안에 안 오면 캐시), 그 밖의 파일(아이콘 등): 캐시 우선 + 백그라운드 갱신
+  const net = () => fetch(req, { cache: 'no-cache' }).then(r => {
+    if (r.ok) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(req, copy)); }
+    return r;
+  });
+  if (/\.(js|css|html|webmanifest)$/.test(new URL(req.url).pathname)) {
+    e.respondWith(caches.match(req).then(hit => {
+      if (!hit) return net();
+      return Promise.race([net().then(r => r.ok ? r : hit, () => hit), new Promise(r => setTimeout(() => r(hit), 3000))]);
+    }));
+    return;
+  }
   e.respondWith(caches.match(req).then(hit => {
-    const net = fetch(req).then(r => {
-      if (r.ok) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(req, copy)); }
-      return r;
-    }).catch(() => hit);
-    return hit || net;
+    const n = net().catch(() => hit);
+    return hit || n;
   }));
 });
 
