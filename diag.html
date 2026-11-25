@@ -1,0 +1,87 @@
+<!doctype html>
+<!-- 열달노트 알림 진단 페이지. 단계별 결과를 화면에 보이고, 부부 공유가 켜져 있으면 공유 저장소 diag/에도 올린다(개인 데이터 없음: 브라우저 종류·권한 상태·오류 문구만).
+     출처: [Claude] 2026-11-25 작성 -->
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>열달노트 알림 진단</title>
+<style>
+body{margin:0;padding:16px;background:#1b1a1f;color:#eee;font:16px/1.5 system-ui,sans-serif}
+h1{font-size:20px;margin:0 0 12px}button{display:block;width:100%;margin:10px 0;padding:14px;border:0;border-radius:12px;background:#ff8fab;color:#222;font-size:17px;font-weight:700}
+button.g{background:#3a3842;color:#eee}pre{white-space:pre-wrap;word-break:break-all;background:#26252b;border-radius:12px;padding:12px;font-size:13px}
+.s{color:#aaa;font-size:14px}
+</style></head><body>
+<h1>열달노트 알림 진단</h1>
+<div class="s">위에서부터 차례로 누르고, 끝나면 이 화면을 캡처해 주세요.</div>
+<button id="b1">1. 알림 허용 요청</button>
+<button id="b2">2. 이 폰을 알림 받을 폰으로 등록</button>
+<button id="b3" class="g">3. 폰에서 바로 알림 띄워 보기</button>
+<pre id="out"></pre>
+<script>
+const out = document.getElementById('out'), L = [], sess = 's' + Date.now().toString(36);
+let cfg = null, meta = {};
+const log = m => { const t = new Date().toTimeString().slice(0, 8); L.push(t + ' ' + m); out.textContent = L.join('\n'); };
+const within = (p, ms, fb) => Promise.race([Promise.resolve(p).catch(e => 'ERR ' + (e && (e.name + ': ' + e.message))), new Promise(r => setTimeout(() => r(fb), ms))]);
+const err = e => (e && (e.name + ': ' + e.message)) || String(e);
+async function upload() {
+  if (!cfg) return;
+  try { await fetch(`${cfg.url.replace(/\/+$/, '')}/rooms/${cfg.code}/diag/${sess}.json`, { method: 'PUT', body: JSON.stringify({ at: Date.now(), log: L }) }); } catch (e) { /* 오프라인 */ }
+}
+function readMeta() {
+  return new Promise(res => {
+    const r = indexedDB.open('yeoldal-note');
+    r.onerror = () => res({});
+    r.onsuccess = () => { const db = r.result; if (!db.objectStoreNames.contains('meta')) return res({});
+      const q = db.transaction('meta').objectStore('meta').getAll(); q.onsuccess = () => { const o = {}; for (const x of q.result) o[x.key] = x.value; res(o); }; q.onerror = () => res({}); };
+  });
+}
+const VAPID_PUBLIC = 'BGLneECTpSbOg2liwse7zi2kBkCQjPjWgscqx6H0xGHB-mfGABV2_SzrjTs_HxqGPAXDhK_Dk6XNnTJxnJe8Pys';
+const b64u = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
+async function info() {
+  meta = await readMeta(); cfg = meta.sync && meta.sync.url && meta.sync.code ? meta.sync : null;
+  log('브라우저: ' + navigator.userAgent);
+  log('앱 화면 모드: ' + (matchMedia('(display-mode: standalone)').matches ? '홈 화면 앱' : '브라우저 탭'));
+  log('부부 공유: ' + (cfg ? '켜짐' : '꺼짐') + ' / 앱 알림 설정: ' + JSON.stringify(meta.notify || null));
+  log('Notification 있음: ' + ('Notification' in window) + ' / 권한: ' + (window.Notification ? Notification.permission : '-'));
+  try { const p = await navigator.permissions.query({ name: 'notifications' }); log('permissions.query: ' + p.state); } catch (e) { log('permissions.query 오류: ' + err(e)); }
+  if (!('serviceWorker' in navigator)) { log('서비스워커 없음'); return upload(); }
+  const reg = await within(navigator.serviceWorker.getRegistration(), 5000, null);
+  log('서비스워커: ' + (reg ? (reg.active ? '작동 중 ' : '대기 ') + reg.scope : '없음'));
+  if (reg) { log('pushManager: ' + !!reg.pushManager);
+    if (reg.pushManager) { try { log('push 권한 상태: ' + await reg.pushManager.permissionState({ userVisibleOnly: true, applicationServerKey: b64u(VAPID_PUBLIC) })); } catch (e) { log('push 권한 상태 오류: ' + err(e)); }
+      try { const s = await reg.pushManager.getSubscription(); log('기존 구독: ' + (s ? new URL(s.endpoint).host : '없음')); } catch (e) { log('기존 구독 오류: ' + err(e)); } } }
+  upload();
+}
+document.getElementById('b1').onclick = () => {
+  log('--- 1. 알림 허용 요청');
+  if (!window.Notification) { log('이 브라우저는 Notification 없음'); return upload(); }
+  const t0 = Date.now(); let p;
+  try { p = Notification.requestPermission(r => log('콜백 결과: ' + r + ' (' + (Date.now() - t0) + 'ms)')); } catch (e) { log('요청 오류: ' + err(e)); return upload(); }
+  if (p && p.then) within(p, 60000, '60초 응답 없음').then(r => { log('결과: ' + r + ' (' + (Date.now() - t0) + 'ms) / 지금 권한: ' + Notification.permission); upload(); });
+  else log('Promise 아님(옛 방식)');
+};
+document.getElementById('b2').onclick = async () => {
+  log('--- 2. 푸시 등록');
+  try {
+    const reg = await within(navigator.serviceWorker.ready, 8000, null); if (!reg) { log('서비스워커 준비 안 됨(8초)'); return upload(); }
+    if (!reg.pushManager) { log('pushManager 없음'); return upload(); }
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) { const t0 = Date.now(); const r = await within(reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(VAPID_PUBLIC) }), 30000, null);
+      if (!r || typeof r === 'string') { log('구독 실패: ' + (r || '30초 응답 없음')); return upload(); } sub = r; log('구독 성공 (' + (Date.now() - t0) + 'ms) ' + new URL(sub.endpoint).host); }
+    else log('기존 구독 사용 ' + new URL(sub.endpoint).host);
+    if (!cfg) { log('부부 공유가 꺼져 있어 등록을 올릴 수 없음'); return upload(); }
+    let dev = meta.devId;
+    if (!dev) { dev = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      await new Promise(res => { const o = indexedDB.open('yeoldal-note'); o.onsuccess = () => { const t = o.result.transaction('meta', 'readwrite'); t.objectStore('meta').put({ key: 'devId', value: dev }); t.oncomplete = res; t.onerror = res; }; o.onerror = res; });
+      meta.devId = dev; log('기기 id 새로 만듦'); }
+    const r = await fetch(`${cfg.url.replace(/\/+$/, '')}/rooms/${cfg.code}/push/${dev}.json`, { method: 'PATCH', body: JSON.stringify({ sub: sub.toJSON(), updatedAt: Date.now() }) });
+    log('공유 저장소 등록: ' + (r.ok ? '성공' : '실패 ' + r.status));
+  } catch (e) { log('오류: ' + err(e)); }
+  upload();
+};
+document.getElementById('b3').onclick = async () => {
+  log('--- 3. 바로 알림');
+  try { const reg = await within(navigator.serviceWorker.ready, 8000, null); await reg.showNotification('열달노트 · 진단 알림', { body: '이게 보이면 폰 알림 표시는 됩니다', icon: 'icons/icon-192.png' }); log('알림 띄움 요청 성공'); }
+  catch (e) { log('오류: ' + err(e)); }
+  upload();
+};
+info();
+</script></body></html>
